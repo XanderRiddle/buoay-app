@@ -354,13 +354,14 @@ button{background:#181c22;color:#e6e9ee;border:1px solid #2a3039;border-radius:6
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
 "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script></head>
 <body><div id="v"></div><div id="hud">
-<button data-t="grid">Grid</button><button data-t="points">Points</button><button data-t="cams">Camera path</button>
+<button data-t="lines">Grid lines</button> Surface: <button data-s="off">Off</button><button data-s="blue">Blue</button><button data-s="photo">Photo</button> <button data-t="points">Points</button><button data-t="cams">Camera path</button>
 <button id="reset">Reset view</button> &nbsp; drag to rotate, right-drag to pan, scroll to zoom</div>
 <script type="module">
 __VIEWER__
 const viewer = createModelViewer(document.getElementById('v'));
 viewer.update(__DATA__);
 document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => viewer.setVisible(b.dataset.t, !viewer.isVisible(b.dataset.t)));
+document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => viewer.setSurface(b.dataset.s));
 document.getElementById('reset').onclick = () => viewer.resetView();
 </script></body></html>"""
 

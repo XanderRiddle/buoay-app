@@ -12,6 +12,7 @@ points. From them we solve for the scale + rotation + shift that lines the
 new batch up with everything built so far (the Umeyama method).
 """
 
+import base64
 import time
 
 import cv2
@@ -185,7 +186,7 @@ def apply_sim(sim, pts):
 # Grid surface
 # --------------------------------------------------------------------------- #
 
-def fit_grid(points, target_cells=48, min_pts=4):
+def fit_grid(points, colors=None, target_cells=48, min_pts=4):
     """
     Fits a heightfield grid to the points: find the dominant plane, bin points
     over it, and keep the median height per cell. Good for walls and hull sides.
@@ -206,10 +207,14 @@ def fit_grid(points, target_cells=48, min_pts=4):
     mad = np.median(np.abs(h - np.median(h))) + 1e-9
     keep = np.abs(h - np.median(h)) < 6 * mad
     u, v, h = u[keep], v[keep], h[keep]
+    if colors is not None:
+        colors = colors[keep]
     u0, u1 = np.percentile(u, [0.5, 99.5])
     v0, v1 = np.percentile(v, [0.5, 99.5])
     inside = (u >= u0) & (u <= u1) & (v >= v0) & (v <= v1)
     u, v, h = u[inside], v[inside], h[inside]
+    if colors is not None:
+        colors = colors[inside]
     cell = max(u1 - u0, v1 - v0) / target_cells
     if cell <= 0:
         return None
@@ -230,10 +235,39 @@ def fit_grid(points, target_cells=48, min_pts=4):
     grid = grid.reshape(nv, nu)
 
     grid = _clean_grid(grid)
+    tex = _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid) if colors is not None else None
     origin = center + u0 * u_ax + v0 * v_ax
     return {"origin": origin.tolist(), "u": u_ax.tolist(), "v": v_ax.tolist(), "n": n_ax.tolist(),
             "cell": float(cell), "nu": nu, "nv": nv,
-            "h": [None if np.isnan(x) else round(float(x), 5) for x in grid.ravel()]}
+            "h": [None if np.isnan(x) else round(float(x), 5) for x in grid.ravel()],
+            "texture": tex}
+
+
+TEX_SUB = 4  # photo texture pixels per grid cell (per side)
+
+
+def _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid):
+    """
+    Photo texture for the grid: average camera color on a raster TEX_SUB times finer than
+    the grid, gaps filled by inpainting. Returned as a PNG data URL.
+    """
+    W, H = (nu - 1) * TEX_SUB + 1, (nv - 1) * TEX_SUB + 1
+    x = np.clip(np.round((u - u0) / cell * TEX_SUB).astype(int), 0, W - 1)
+    y = np.clip(np.round((v - v0) / cell * TEX_SUB).astype(int), 0, H - 1)
+    flat = y * W + x
+    counts = np.bincount(flat, minlength=W * H)
+    img = np.zeros((W * H, 3), np.float64)
+    for c in range(3):
+        img[:, c] = np.bincount(flat, weights=colors[:, c], minlength=W * H)
+    have = counts > 0
+    img[have] /= counts[have, None]
+    img = (np.clip(img, 0, 1) * 255).astype(np.uint8).reshape(H, W, 3)
+    holes = (~have).reshape(H, W).astype(np.uint8)
+    if holes.any() and have.any():
+        img = cv2.inpaint(img, holes, 3, cv2.INPAINT_TELEA)
+    ok, png = cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    return {"w": W, "h": H, "sub": TEX_SUB,
+            "png": "data:image/png;base64," + base64.b64encode(png.tobytes()).decode()}
 
 
 def _neighbors(grid):
@@ -414,7 +448,7 @@ class Reconstructor:
 
     def model_message(self, scan_id, max_points=25000):
         pts, cols = self.all_points(max_points=max_points)
-        grid = fit_grid(self.all_points(max_points=300000)[0])
+        grid = fit_grid(*self.all_points(max_points=300000))
         return {
             "type": "model",
             "scan": scan_id,
