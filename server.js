@@ -39,19 +39,30 @@ async function main() {
   const app = express();
   const pub = path.join(__dirname, 'public');
   app.get('/', (req, res) => res.redirect('/dashboard'));
+  app.get('/favicon.ico', (req, res) => res.status(204).end());
   app.get('/recording', (req, res) => res.sendFile(path.join(pub, 'recording.html')));
   app.get('/dashboard', (req, res) => res.sendFile(path.join(pub, 'dashboard.html')));
+  app.get('/model-viewer.js', (req, res) => res.sendFile(path.join(pub, 'model-viewer.js')));
+  // three.js served locally so the dashboard works without internet
+  app.use('/vendor/three', express.static(path.join(__dirname, 'node_modules', 'three')));
 
   const server = https.createServer(await getCert(), app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   let camera = null; // the single active phone connection
   const viewers = new Set();
+  let worker = null; // the Python reconstruction worker
+  let lastModel = null; // latest 3D model (JSON string), replayed to new dashboards
+  let lastRecon = null; // latest worker status (JSON string)
   let recording = false;
   let frameCount = 0;
 
   const broadcastStatus = () => {
     const msg = JSON.stringify({ type: 'status', cameraConnected: !!camera, recording });
+    for (const v of viewers) if (v.readyState === 1) v.send(msg);
+    if (worker && worker.readyState === 1) worker.send(msg);
+  };
+  const toViewers = (msg) => {
     for (const v of viewers) if (v.readyState === 1) v.send(msg);
   };
 
@@ -72,7 +83,10 @@ async function main() {
           for (const v of viewers) {
             if (v.readyState === 1 && v.bufferedAmount < 2 * 1024 * 1024) v.send(data, { binary: true });
           }
-          // TODO (later): hand `data` to the damage-detection model here.
+          // The reconstruction worker gets every frame it can keep up with and picks keyframes.
+          if (worker && worker.readyState === 1 && worker.bufferedAmount < 4 * 1024 * 1024) {
+            worker.send(data, { binary: true });
+          }
           return;
         }
         try {
@@ -93,10 +107,34 @@ async function main() {
           broadcastStatus();
         }
       });
+    } else if (role === 'worker') {
+      if (worker) worker.close(4000, 'Replaced by a newer worker');
+      worker = ws;
+      console.log('[worker] connected');
+      ws.send(JSON.stringify({ type: 'status', cameraConnected: !!camera, recording }));
+      ws.on('message', (data, isBinary) => {
+        if (isBinary) return;
+        const text = data.toString();
+        let type;
+        try { type = JSON.parse(text).type; } catch { return; }
+        if (type === 'model') lastModel = text;
+        if (type === 'recon') lastRecon = text;
+        toViewers(text);
+      });
+      ws.on('close', () => {
+        if (worker === ws) {
+          worker = null;
+          lastRecon = JSON.stringify({ type: 'recon', state: 'offline' });
+          toViewers(lastRecon);
+          console.log('[worker] disconnected');
+        }
+      });
     } else {
       viewers.add(ws);
       console.log(`[dashboard] connected (${viewers.size} open)`);
       ws.send(JSON.stringify({ type: 'status', cameraConnected: !!camera, recording }));
+      ws.send(lastRecon || JSON.stringify({ type: 'recon', state: 'offline' }));
+      if (lastModel) ws.send(lastModel);
       ws.on('close', () => viewers.delete(ws));
     }
   });

@@ -1,11 +1,19 @@
+# processing: 3D reconstruction
+
+- `worker.py`: the live reconstruction worker (started by `start.bat` in the main folder). Also `--images <folder>` to rebuild a model from photos.
+- `recon.py`: VGGT wrapper, batch stitching, grid fitting.
+- `vggt_smoke_test.py`: one-off test of VGGT on a few photos (memory + timing).
+
+`setup.bat` installs everything for all three. If you set up before the live worker existed, run it again (it adds the `websockets` package).
+
 # VGGT smoke test
 
 Checks whether VGGT (image -> 3D model) runs on the GTX 1650 laptop, and how much memory and time it needs.
 
 ## 1. One-time setup
 
-1. Update the NVIDIA driver (GeForce Experience or nvidia.com/drivers).
-2. Install **Python 3.11** from python.org. On the first installer screen, tick **"Add python.exe to PATH"**.
+1. Update the NVIDIA driver (GeForce Experience or nvidia.com/drivers). No NVIDIA GPU? Skip this; setup installs the CPU version instead.
+2. Install **Python 3.11** from python.org. On the first installer screen, tick **"Add python.exe to PATH"**. (Python from MSYS2 / MinGW / Git Bash will not work: PyTorch doesn't support it. `setup.bat` checks for this.)
 3. Double-click **`setup.bat`** in this folder. It downloads ~2.5 GB and takes a while. At the end it should print `CUDA GPU found: NVIDIA GeForce GTX 1650`.
 
 ## 2. Take test photos
@@ -14,6 +22,7 @@ Put **6-10 photos** in `test_images`. How you take them matters more than anythi
 
 - Pick a wall with **texture**: brick, a bookshelf, posters, a whiteboard with writing. A blank painted wall will fail.
 - Stand ~1-2 m away and **step sideways ~30 cm between shots**, keeping the camera pointed at the wall. Each photo should overlap the previous one by about two thirds.
+- Hold the phone **sideways (landscape)**. Portrait photos use ~25% more GPU memory.
 - Hold still so photos are sharp. Normal phone photos are fine; they get resized to 518 px wide.
 
 ## 3. Run it

@@ -80,6 +80,11 @@ def load_model(device):
 
         model.aggregator.forward = agg_forward_fp16
 
+        # The depth head works at full image resolution in float32, which was the biggest
+        # memory spike (~1.1 GB extra for 6 photos). Running it one photo at a time fixes that.
+        depth_forward = model.depth_head.forward
+        model.depth_head.forward = lambda *a, **k: depth_forward(*a, **{**k, "frames_chunk_size": 1})
+
     model.to(device)
     log(f"  loaded in {time.time() - t:.1f}s")
     if device.type == "cuda":
@@ -219,6 +224,8 @@ def main():
         log(f"  - {os.path.basename(p)}")
     images = load_and_preprocess_images(paths)  # (S, 3, H, W), width 518
     log(f"Model input size: {images.shape[-1]}x{images.shape[-2]} per image")
+    if images.shape[-2] > images.shape[-1] * 0.9:
+        log("  (tip: landscape photos come out 518x392 and use ~25% less memory than portrait)")
 
     model = load_model(device)
 
@@ -253,6 +260,9 @@ def main():
     if peak is not None:
         total = torch.cuda.get_device_properties(0).total_memory
         log(f"  Peak GPU memory:   {gb(peak)} of {gb(total)}  ({100 * peak / total:.0f}%)")
+        if peak > total * 0.95:
+            log("                     Over the limit: Windows spilled into system RAM, which makes it much slower.")
+            log("                     Use fewer photos (--frames 4) or take them in landscape.")
     log(f"  Points kept:       {len(pts):,}  (top {100 - args.conf:.0f}% by confidence)")
     log(f"  Flatness check:    RMS distance from best-fit plane = {100 * rms / extent:.1f}% of scene width")
     log("                     (a flat wall should be a few % or less)")

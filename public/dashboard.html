@@ -6,62 +6,151 @@
 <title>Buoay Dashboard</title>
 <style>
   :root { --bg: #0f1216; --panel: #181c22; --line: #2a3039; --text: #e6e9ee; --muted: #8b94a3;
-          --ok: #3ecf8e; --rec: #ff5449; --off: #5b6472; }
+          --ok: #3ecf8e; --rec: #ff5449; --busy: #f5b73b; --off: #5b6472; --accent: #4da3ff; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
-  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
-  h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .02em; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0 8px 0 0; font-weight: 700; letter-spacing: .02em; }
   .pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
           background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
   .pill i { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
   .pill.ok i { background: var(--ok); }
+  .pill.busy i { background: var(--busy); animation: blink 1s infinite; }
   .pill.rec i { background: var(--rec); animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .25; } }
-  main { display: grid; grid-template-columns: 1fr 260px; gap: 16px; padding: 16px 20px; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-  .feed { position: relative; background: #000; border: 1px solid var(--line); border-radius: 10px;
-          aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-  .feed img { width: 100%; height: 100%; object-fit: contain; display: none; }
-  .feed .empty { color: var(--muted); font-size: 15px; }
-  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
-  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
-  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; font-size: 14px; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
+  .card-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .card-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; flex: 1; }
+  .view { position: relative; background: #000; aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center; }
+  .view img { width: 100%; height: 100%; object-fit: contain; display: none; }
+  #model { background: #0b0e12; }
+  #model canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
+  .empty { color: var(--muted); font-size: 15px; text-align: center; padding: 0 24px; z-index: 1; pointer-events: none; }
+  .hint { position: absolute; bottom: 8px; left: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
+  button.t { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px;
+             padding: 3px 10px; font-size: 12px; cursor: pointer; }
+  button.t.on { color: var(--text); border-color: var(--accent); background: rgba(77,163,255,.12); }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; font-size: 14px; padding: 14px; }
   dt { color: var(--muted); }
   dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; }
+  .stats dl + dl { border-left: 1px solid var(--line); }
+  #reconMsg { padding: 0 14px 12px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
 </style>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
+</script>
 </head>
 <body>
   <header>
     <h1>Buoay Hull Inspection</h1>
     <span class="pill" id="serverPill"><i></i><span>Server</span></span>
     <span class="pill" id="cameraPill"><i></i><span>Phone offline</span></span>
+    <span class="pill" id="reconPill"><i></i><span>3D worker offline</span></span>
   </header>
   <main>
-    <div class="feed">
-      <img id="frame" alt="Live feed from phone">
-      <div class="empty" id="empty">Waiting for the phone to start recording...</div>
-    </div>
-    <aside>
-      <h2>Stream</h2>
-      <dl>
-        <dt>FPS</dt><dd id="fps">0</dd>
-        <dt>Resolution</dt><dd id="res">-</dd>
-        <dt>Frame size</dt><dd id="size">-</dd>
-        <dt>Bandwidth</dt><dd id="bw">-</dd>
-        <dt>Frames</dt><dd id="count">0</dd>
-        <dt>Last frame</dt><dd id="last">-</dd>
-      </dl>
-    </aside>
+    <section class="card">
+      <div class="card-head"><h2>Live feed</h2></div>
+      <div class="view">
+        <img id="frame" alt="Live feed from phone">
+        <div class="empty" id="empty">Waiting for the phone to start recording...</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>3D model</h2>
+        <button class="t on" data-layer="grid">Grid</button>
+        <button class="t" data-layer="points">Points</button>
+        <button class="t on" data-layer="cams">Camera path</button>
+        <button class="t" id="resetView">Reset view</button>
+      </div>
+      <div class="view" id="model">
+        <div class="empty" id="modelEmpty">Start recording on the phone. The model appears after the first ~6 keyframes.</div>
+        <div class="hint">Drag to rotate · right-drag to pan · scroll to zoom</div>
+      </div>
+    </section>
+
+    <section class="card" style="grid-column: 1 / -1">
+      <div class="stats">
+        <div>
+          <div class="card-head"><h2>Stream</h2></div>
+          <dl>
+            <dt>FPS</dt><dd id="fps">0</dd>
+            <dt>Resolution</dt><dd id="res">-</dd>
+            <dt>Frame size</dt><dd id="size">-</dd>
+            <dt>Bandwidth</dt><dd id="bw">-</dd>
+            <dt>Frames</dt><dd id="count">0</dd>
+            <dt>Last frame</dt><dd id="last">-</dd>
+          </dl>
+        </div>
+        <div>
+          <div class="card-head"><h2>Reconstruction</h2></div>
+          <dl>
+            <dt>Scan</dt><dd id="rScan">-</dd>
+            <dt>Keyframes in model</dt><dd id="rKf">0</dd>
+            <dt>Waiting</dt><dd id="rPending">0</dd>
+            <dt>Batches (skipped)</dt><dd id="rBatches">0</dd>
+            <dt>Last batch</dt><dd id="rTime">-</dd>
+            <dt>Peak GPU memory</dt><dd id="rMem">-</dd>
+          </dl>
+          <div id="reconMsg"></div>
+        </div>
+      </div>
+    </section>
   </main>
 
-<script>
+<script type="module">
+import { createModelViewer } from '/model-viewer.js';
+
 const $ = (id) => document.getElementById(id);
 const img = $('frame');
 let frames = 0, windowFrames = 0, windowBytes = 0, lastFrameAt = 0, lastUrl = null;
 
+const viewer = createModelViewer($('model'));
+document.querySelectorAll('[data-layer]').forEach((b) => {
+  b.onclick = () => {
+    const on = !viewer.isVisible(b.dataset.layer);
+    viewer.setVisible(b.dataset.layer, on);
+    b.classList.toggle('on', on);
+  };
+});
+$('resetView').onclick = () => viewer.resetView();
+
 function setPill(el, cls, text) {
   el.className = 'pill ' + cls;
   el.querySelector('span').textContent = text;
+}
+
+function onRecon(r) {
+  const states = {
+    offline: ['', '3D worker offline'], ready: ['ok', '3D worker ready'],
+    recording: ['ok', '3D: collecting keyframes'], processing: ['busy', '3D: reconstructing'],
+    error: ['rec', '3D worker error'],
+  };
+  const [cls, text] = states[r.state] || ['', r.state];
+  setPill($('reconPill'), cls, text);
+  if (r.state === 'offline') return;
+  $('rScan').textContent = r.scan || '-';
+  $('rKf').textContent = r.keyframes ?? 0;
+  $('rPending').textContent = r.pending ?? 0;
+  $('rBatches').textContent = `${r.batches ?? 0} (${r.rejected ?? 0})`;
+  $('rTime').textContent = r.lastBatchSeconds ? r.lastBatchSeconds.toFixed(1) + ' s' : '-';
+  $('rMem').textContent = r.peakGb ? `${r.peakGb.toFixed(2)} GB` : (r.device === 'cpu' ? 'CPU mode' : '-');
+  if (r.message) $('reconMsg').textContent = r.message;
+}
+
+function onModel(m) {
+  if (m.reset) {
+    viewer.clear();
+    $('modelEmpty').style.display = 'block';
+    $('modelEmpty').textContent = 'New scan: the model appears after the first ~6 keyframes.';
+    return;
+  }
+  viewer.update(m);
+  $('modelEmpty').style.display = 'none';
 }
 
 function connect() {
@@ -71,6 +160,7 @@ function connect() {
   ws.onclose = () => {
     setPill($('serverPill'), '', 'Server offline');
     setPill($('cameraPill'), '', 'Phone offline');
+    setPill($('reconPill'), '', '3D worker offline');
     setTimeout(connect, 1500);
   };
   ws.onmessage = (ev) => {
@@ -81,7 +171,8 @@ function connect() {
         else if (s.recording) setPill($('cameraPill'), 'rec', 'Phone recording');
         else setPill($('cameraPill'), 'ok', 'Phone connected, not recording');
         $('empty').textContent = s.recording ? 'Waiting for frames...' : 'Waiting for the phone to start recording...';
-      }
+      } else if (s.type === 'recon') onRecon(s);
+      else if (s.type === 'model') onModel(s);
       return;
     }
     // Binary message = one JPEG frame

@@ -1,2 +1,4 @@
 node_modules/
 certs/
+processing/scans/
+processing/output/

@@ -1,4 +1,5 @@
 .venv/
 output/
+scans/
 test_images/
 __pycache__/
