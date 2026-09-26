@@ -16,6 +16,7 @@ write output/model_preview.html. Handy for testing without the phone.
 
 import argparse
 import asyncio
+import collections
 import glob
 import json
 import os
@@ -122,6 +123,9 @@ class ReconThread(threading.Thread):
         self.scan_id = None
         self.scan_dir = None
         self.state = "ready"
+        self.held = collections.deque()   # start/stop commands found while draining keyframes
+        self.dirty = False                # model changed since last send
+        self.last_sent = 0.0
 
     def status(self, state=None, message=None):
         if state:
@@ -135,36 +139,62 @@ class ReconThread(threading.Thread):
             "device": self.runner.device.type,
         })
 
+    def _next(self):
+        return self.held.popleft() if self.held else self.q.get()
+
+    def _add_keyframe(self, cmd):
+        kf_id, jpeg, rgb = cmd[1], cmd[2], cmd[3]
+        if self.scan_dir:
+            with open(os.path.join(self.scan_dir, f"kf_{kf_id:04d}.jpg"), "wb") as f:
+                f.write(jpeg)
+        self.rec.add_keyframe(kf_id, rgb)
+
+    def _drain_keyframes(self):
+        """Move every keyframe that queued up during the last batch into the reconstructor,
+        so the next batch can take as many new ones as fit (this is how it catches up)."""
+        while True:
+            try:
+                cmd = self.q.get_nowait()
+            except queue.Empty:
+                return
+            if cmd[0] == "keyframe":
+                self._add_keyframe(cmd)
+            else:
+                self.held.append(cmd)  # start/stop: handle after the keyframes before it
+                return
+
     def run(self):
         while True:
-            cmd = self.q.get()
+            cmd = self._next()
             kind = cmd[0]
             if kind == "start":
                 self.scan_id = cmd[1]
                 self.scan_dir = os.path.join(HERE, "scans", self.scan_id)
                 os.makedirs(self.scan_dir, exist_ok=True)
                 self.rec.reset()
+                self.last_sent = 0.0
                 self.send({"type": "model", "scan": self.scan_id, "reset": True})
                 self.status("recording", "New scan started")
                 log(f"scan {self.scan_id} started")
             elif kind == "keyframe":
-                kf_id, jpeg, rgb = cmd[1], cmd[2], cmd[3]
-                if self.scan_dir:
-                    with open(os.path.join(self.scan_dir, f"kf_{kf_id:04d}.jpg"), "wb") as f:
-                        f.write(jpeg)
-                self.rec.add_keyframe(kf_id, rgb)
+                self._add_keyframe(cmd)
+                self._drain_keyframes()
                 self.status()
                 self._process(flush=False)
             elif kind == "stop":
                 self._process(flush=True)
+                self._send_model(force=True)
                 if self.scan_id and self.rec.order:
                     self._save_final()
                 self.status("ready", "Scan finished")
                 log(f"scan {self.scan_id} finished: {len(self.rec.order)} keyframes")
 
     def _process(self, flush):
-        # take all keyframes that arrived meanwhile first, so batches stay full
-        while self.rec.ready(flush):
+        while True:
+            if not self.held:
+                self._drain_keyframes()
+            if not self.rec.ready(flush):
+                break
             self.status("processing", f"Reconstructing batch {self.rec.batches + 1}")
             try:
                 changed = self.rec.step(flush)
@@ -174,12 +204,25 @@ class ReconThread(threading.Thread):
                 self.status("error", str(e))
                 return
             if changed:
-                msg = self.rec.model_message(self.scan_id)
-                self.send(msg)
-                if self.scan_dir:
-                    with open(os.path.join(self.scan_dir, "model.json"), "w") as f:
-                        json.dump(msg, f)
+                self.dirty = True
+                self._send_model()
             self.status("recording" if not flush else "processing")
+        self._send_model(force=not flush)
+
+    def _send_model(self, force=False):
+        """Rebuilding + sending the model takes ~0.2 s, so while catching up do it at most every 2 s."""
+        if not self.dirty or not self.rec.order:
+            return
+        backlog = len(self.rec.pending) + self.q.qsize()
+        if not force and backlog > 0 and time.time() - self.last_sent < 2.0:
+            return
+        msg = self.rec.model_message(self.scan_id)
+        self.send(msg)
+        self.dirty = False
+        self.last_sent = time.time()
+        if self.scan_dir:
+            with open(os.path.join(self.scan_dir, "model.json"), "w") as f:
+                json.dump(msg, f)
 
     def _save_final(self):
         pts, cols = self.rec.all_points()

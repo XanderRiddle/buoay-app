@@ -15,9 +15,14 @@ new batch up with everything built so far (the Umeyama method).
 import base64
 import time
 
+import warnings
+
 import cv2
 import numpy as np
 import torch
+
+# VGGT's own code uses an old PyTorch call that prints a warning on every batch
+warnings.filterwarnings("ignore", message=r".*torch\.cuda\.amp\.autocast.*", category=FutureWarning)
 from PIL import Image
 
 VGGT_WIDTH = 518   # VGGT's native input width
@@ -47,8 +52,8 @@ def gpu_profile(vram_gb):
         return dict(batch=6, min_overlap=2, new=4, first=4, kf_shift=0.18, depth_chunk=8)
     if vram_gb >= 11:              # 12 GB+ cards
         return dict(batch=16, min_overlap=4, new=3, first=4, kf_shift=0.10, depth_chunk=8)
-    if vram_gb >= 7.5:             # RTX 3070 Ti 8 GB (leaves room for the desktop's own display)
-        return dict(batch=10, min_overlap=3, new=3, first=4, kf_shift=0.10, depth_chunk=4)
+    if vram_gb >= 7.5:             # RTX 3070 Ti 8 GB: 10 photos measured 2.1 s / 4.8 GB peak, so 14 fits
+        return dict(batch=14, min_overlap=3, new=3, first=4, kf_shift=0.12, depth_chunk=4)
     if vram_gb >= 5.5:
         return dict(batch=8, min_overlap=2, new=4, first=4, kf_shift=0.15, depth_chunk=1)
     return dict(batch=6, min_overlap=2, new=4, first=6, kf_shift=0.18, depth_chunk=1)  # 4 GB cards
@@ -427,11 +432,15 @@ class Reconstructor:
             self.order.append(kf_id)
             self.rgb[kf_id] = rgb
 
-        # only recent images can be reused as overlap in the next batch
+        # only recent keyframes can be reused as overlap in the next batch: drop the full-size
+        # data of older ones (keeps long scans from eating RAM; their good points stay)
         keep = set(self.order[-(self.batch_size - 1):])
         for k in list(self.rgb):
             if k not in keep:
                 del self.rgb[k]
+                f = self.frames[k]
+                for key in ("points", "conf", "color"):
+                    f.pop(key, None)
         self.batches += 1
         log(f"batch {self.batches}: {len(batch_ids)} frames in {self.last_batch_seconds:.1f}s"
             + (f", peak GPU {self.runner.last_peak_gb:.2f} GB" if self.runner.last_peak_gb else "")
@@ -473,7 +482,7 @@ class Reconstructor:
         P, C = [], []
         for k in self.order:
             f = self.frames[k]
-            if cp == self.conf_percentile:
+            if cp == self.conf_percentile or "conf" not in f:
                 P.append(f["good_pts"]); C.append(f["good_cols"])
             else:
                 good = (f["conf"] >= np.percentile(f["conf"], cp)) & np.isfinite(f["points"]).all(-1)
