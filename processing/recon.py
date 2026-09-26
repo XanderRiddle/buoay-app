@@ -33,17 +33,25 @@ def log(msg):
 # VGGT model
 # --------------------------------------------------------------------------- #
 
-def default_batch(vram_gb):
-    """Photos per batch and overlap for the GPU size (weights take ~2.6 GB, ~0.17 GB per photo)."""
-    if vram_gb is None:
-        return 6, 2          # CPU: keep batches small so updates still come regularly
-    if vram_gb >= 11:
-        return 16, 4
-    if vram_gb >= 7.5:
-        return 10, 3         # e.g. RTX 3070 Ti 8 GB (leaves room for the desktop's own display)
+def gpu_profile(vram_gb):
+    """
+    Settings for the GPU size. Weights take ~2.6 GB; each photo in a batch ~0.1-0.2 GB more.
+      batch        max photos VGGT sees at once
+      min_overlap  photos always repeated from the previous batch (for stitching)
+      new          new keyframes that trigger the next batch (fewer = smoother, more frequent updates)
+      first        keyframes needed before the very first model appears
+      kf_shift     how far the view must move (fraction of frame width) before a new keyframe
+      depth_chunk  photos the full-resolution depth step handles at once (1 saves memory on small cards)
+    """
+    if vram_gb is None:            # CPU: slow, so few and far between
+        return dict(batch=6, min_overlap=2, new=4, first=4, kf_shift=0.18, depth_chunk=8)
+    if vram_gb >= 11:              # 12 GB+ cards
+        return dict(batch=16, min_overlap=4, new=3, first=4, kf_shift=0.10, depth_chunk=8)
+    if vram_gb >= 7.5:             # RTX 3070 Ti 8 GB (leaves room for the desktop's own display)
+        return dict(batch=10, min_overlap=3, new=3, first=4, kf_shift=0.10, depth_chunk=4)
     if vram_gb >= 5.5:
-        return 8, 2
-    return 6, 2              # 4 GB cards
+        return dict(batch=8, min_overlap=2, new=4, first=4, kf_shift=0.15, depth_chunk=1)
+    return dict(batch=6, min_overlap=2, new=4, first=6, kf_shift=0.18, depth_chunk=1)  # 4 GB cards
 
 
 class VGGTRunner:
@@ -69,6 +77,7 @@ class VGGTRunner:
         model.eval()
 
         self.vram_gb = None
+        self.depth_chunk = 1
         if self.device.type == "cuda":
             props = torch.cuda.get_device_properties(self.device)
             self.vram_gb = props.total_memory / 1024**3
@@ -86,7 +95,7 @@ class VGGTRunner:
 
             model.aggregator.forward = agg_forward_16
             depth_forward = model.depth_head.forward
-            model.depth_head.forward = lambda *a, **k: depth_forward(*a, **{**k, "frames_chunk_size": 1})
+            model.depth_head.forward = lambda *a, **k: depth_forward(*a, **{**k, "frames_chunk_size": self.depth_chunk})
 
         self.model = model.to(self.device)
         log(f"VGGT ready in {time.time() - t:.0f}s")
@@ -265,9 +274,21 @@ def _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid):
     holes = (~have).reshape(H, W).astype(np.uint8)
     if holes.any() and have.any():
         img = cv2.inpaint(img, holes, 3, cv2.INPAINT_TELEA)
-    ok, png = cv2.imencode(".png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
     return {"w": W, "h": H, "sub": TEX_SUB,
-            "png": "data:image/png;base64," + base64.b64encode(png.tobytes()).decode()}
+            "png": "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()}
+
+
+def pack_points(pts, cols):
+    """Compact point cloud for the dashboard: positions as 16-bit steps inside the bounding box, colors as bytes."""
+    if len(pts) == 0:
+        return {"n": 0}
+    lo, hi = pts.min(0), pts.max(0)
+    span = np.maximum(hi - lo, 1e-9)
+    q = np.round((pts - lo) / span * 65535).astype("<u2")
+    c = (np.clip(cols, 0, 1) * 255).astype(np.uint8)
+    return {"n": len(pts), "min": lo.tolist(), "max": hi.tolist(),
+            "q": base64.b64encode(q.tobytes()).decode(), "c8": base64.b64encode(c.tobytes()).decode()}
 
 
 def _neighbors(grid):
@@ -312,18 +333,23 @@ class Reconstructor:
     (the first batch's frame).
     """
 
-    def __init__(self, runner, batch_size=6, overlap=2, conf_percentile=50):
+    def __init__(self, runner, profile=None, conf_percentile=50):
         self.runner = runner
-        self.batch_size = batch_size
-        self.overlap = overlap
+        p = profile or gpu_profile(getattr(runner, "vram_gb", None))
+        self.batch_size = p["batch"]
+        self.min_overlap = p["min_overlap"]
+        self.new_per_batch = p["new"]
+        self.first_min = p["first"]
+        if hasattr(runner, "depth_chunk"):
+            runner.depth_chunk = p["depth_chunk"]
         self.conf_percentile = conf_percentile
         self.reset()
 
     def reset(self):
         self.pending = []      # [(kf_id, rgb)] waiting to be processed
-        self.frames = {}       # kf_id -> {points, conf, color, cam_to_world} in world frame
+        self.frames = {}       # kf_id -> {points, conf, color, cam_to_world, good_pts, good_cols} in world frame
         self.order = []        # kf_ids in the order they joined the model
-        self.rgb = {}          # kf_id -> rgb, kept only for the overlap frames
+        self.rgb = {}          # kf_id -> rgb, kept only for recent frames (possible overlap)
         self.batches = 0
         self.rejected = 0
         self.last_batch_seconds = None
@@ -334,10 +360,9 @@ class Reconstructor:
         self.pending.append((kf_id, rgb))
 
     def ready(self, flush=False):
-        new_needed = self.batch_size if not self.order else self.batch_size - self.overlap
-        if flush:
-            return len(self.pending) >= (2 if not self.order else 1)
-        return len(self.pending) >= new_needed
+        if not self.order:
+            return len(self.pending) >= (2 if flush else self.first_min)
+        return len(self.pending) >= (1 if flush else self.new_per_batch)
 
     # -- processing -------------------------------------------------------- #
     def step(self, flush=False):
@@ -345,9 +370,16 @@ class Reconstructor:
         if not self.ready(flush):
             return False
         first = not self.order
-        n_new = self.batch_size if first else self.batch_size - self.overlap
+        if first:
+            overlap_ids = []
+            n_new = min(len(self.pending), self.batch_size)
+        else:
+            # Fill the batch: when caught up, reuse lots of recent keyframes (better stitching,
+            # the GPU has time to spare); when behind, take more new ones to catch up.
+            n_overlap = min(len(self.order), max(self.min_overlap, self.batch_size - len(self.pending)))
+            n_new = min(len(self.pending), self.batch_size - n_overlap)
+            overlap_ids = self.order[-n_overlap:]
         new = self.pending[:n_new]
-        overlap_ids = [] if first else self.order[-self.overlap:]
         batch_ids = overlap_ids + [k for k, _ in new]
         batch_rgb = [self.rgb[k] for k in overlap_ids] + [rgb for _, rgb in new]
 
@@ -356,7 +388,11 @@ class Reconstructor:
             out = self.runner.predict(batch_rgb)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            if self.batch_size > 3:
+            if getattr(self.runner, "depth_chunk", 1) > 1:
+                self.runner.depth_chunk = max(1, self.runner.depth_chunk // 2)
+                log(f"GPU out of memory -> depth step now {self.runner.depth_chunk} photo(s) at a time")
+                return False
+            if self.batch_size > self.min_overlap + 2:
                 self.batch_size -= 1
                 log(f"GPU out of memory -> batch size lowered to {self.batch_size}")
                 return False
@@ -380,18 +416,21 @@ class Reconstructor:
             c2w[:3, :3] = R @ c2w[:3, :3]
             c2w[:3, 3] = s * R @ c2w[:3, 3] + tr
             st = STORE_STRIDE
+            pts = apply_sim(sim, f["points"][::st, ::st]).astype(np.float32)
+            conf, color = f["conf"][::st, ::st], f["color"][::st, ::st]
+            good = (conf >= np.percentile(conf, self.conf_percentile)) & np.isfinite(pts).all(-1)
             self.frames[kf_id] = {
-                "points": apply_sim(sim, f["points"][::st, ::st]).astype(np.float32),
-                "conf": f["conf"][::st, ::st],
-                "color": f["color"][::st, ::st],
-                "cam_to_world": c2w,
+                "points": pts, "conf": conf, "color": color, "cam_to_world": c2w,
+                # confident points cached once, so rebuilding the grid stays quick as the model grows
+                "good_pts": pts[good], "good_cols": color[good].astype(np.float32),
             }
             self.order.append(kf_id)
             self.rgb[kf_id] = rgb
 
-        # only the last OVERLAP images are needed for the next batch
+        # only recent images can be reused as overlap in the next batch
+        keep = set(self.order[-(self.batch_size - 1):])
         for k in list(self.rgb):
-            if k not in self.order[-self.overlap:]:
+            if k not in keep:
                 del self.rgb[k]
         self.batches += 1
         log(f"batch {self.batches}: {len(batch_ids)} frames in {self.last_batch_seconds:.1f}s"
@@ -434,12 +473,14 @@ class Reconstructor:
         P, C = [], []
         for k in self.order:
             f = self.frames[k]
-            good = (f["conf"] >= np.percentile(f["conf"], cp)) & np.isfinite(f["points"]).all(-1)
-            P.append(f["points"][good])
-            C.append(f["color"][good])
+            if cp == self.conf_percentile:
+                P.append(f["good_pts"]); C.append(f["good_cols"])
+            else:
+                good = (f["conf"] >= np.percentile(f["conf"], cp)) & np.isfinite(f["points"]).all(-1)
+                P.append(f["points"][good]); C.append(f["color"][good])
         P, C = np.concatenate(P), np.concatenate(C)
         if max_points and len(P) > max_points:
-            sel = np.random.default_rng(0).choice(len(P), max_points, replace=False)
+            sel = np.random.default_rng(0).integers(0, len(P), max_points)  # fast sampling
             P, C = P[sel], C[sel]
         return P, C
 
@@ -455,7 +496,6 @@ class Reconstructor:
             "keyframes": len(self.order),
             "batches": self.batches,
             "grid": grid,
-            "points": {"p": np.round(pts, 4).ravel().tolist(),
-                       "c": np.round(cols, 3).ravel().tolist()},
+            "points": pack_points(pts, cols),
             "cams": np.round(self.camera_positions(), 4).ravel().tolist(),
         }

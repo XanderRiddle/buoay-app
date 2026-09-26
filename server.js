@@ -88,23 +88,39 @@ function publishLinks() {
     const l = linkSet(base);
     lines.push(`  Dashboard: ${l.dashboard}`, `  Phone:     ${l.phone}`);
   }
+  if (ntfyTopic()) {
+    lines.push('', `Get the new link on any device when it changes: https://ntfy.sh/${ntfyTopic()}`,
+      '(open that page once, or subscribe to the topic in the free ntfy app)');
+  }
   const text = lines.join('\n') + '\n';
   fs.writeFileSync(LINKS_FILE, text);
+  // Also drop a copy in the OneDrive root (if this PC has OneDrive), so it syncs to your laptop
+  // even when the project folder itself isn't in OneDrive.
+  if (process.env.OneDrive && fs.existsSync(process.env.OneDrive)) {
+    try { fs.writeFileSync(path.join(process.env.OneDrive, 'buoay-app-LINKS.txt'), text); } catch {}
+  }
   console.log('\n' + text);
   notify();
 }
 
-// Optional phone notification with the new link (free, no account): put a topic name in
-// certs/ntfy-topic.txt and subscribe to it in the ntfy app / ntfy.sh/<topic>.
-function notify() {
+// Optional notification with the new link each time it changes (free, no account): put a
+// hard-to-guess topic name in certs/ntfy-topic.txt and open https://ntfy.sh/<topic> on your devices.
+function ntfyTopic() {
   const p = path.join(CERT_DIR, 'ntfy-topic.txt');
-  if (!links.public || !fs.existsSync(p)) return;
-  const topic = fs.readFileSync(p, 'utf8').trim();
+  return fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() || null : null;
+}
+
+let lastNotified = null;
+function notify() {
+  const topic = ntfyTopic();
+  if (!links.public || !topic || lastNotified === links.public) return;
+  lastNotified = links.public;
   const l = linkSet(links.public);
   fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
     method: 'POST', body: `Dashboard: ${l.dashboard}\nPhone: ${l.phone}`,
     headers: { Title: 'buoay-app is online', Click: l.dashboard },
-  }).catch((e) => console.log('[ntfy] failed:', e.message));
+  }).then(() => console.log('[ntfy] sent new link to', `https://ntfy.sh/${topic}`))
+    .catch((e) => console.log('[ntfy] failed:', e.message));
 }
 
 function findCloudflared() {

@@ -25,13 +25,14 @@ Double-click **`start.bat`**. It downloads the tunnel program the first time, th
 (**buoay server** and **buoay 3D worker**) that restart themselves if they crash. The first start also
 downloads the VGGT model (~5 GB).
 
-About 10 seconds later, **`LINKS.txt`** in this folder has the links. The folder is in OneDrive, so the
-file shows up on your laptop too:
+About 10 seconds later the links are ready:
 
 ```
 Dashboard: https://something-random.trycloudflare.com/dashboard?key=...
 Phone:     https://something-random.trycloudflare.com/recording?key=...
 ```
+
+They're in **`LINKS.txt`** in this folder on the desktop. Copy them to your laptop and phone.
 
 - **Laptop:** open the Dashboard link.
 - **Phone:** on the dashboard, click **Phone link** and scan the QR code (or open the Phone link).
@@ -39,10 +40,9 @@ Phone:     https://something-random.trycloudflare.com/recording?key=...
 Each device only needs the `?key=...` link once; after that it remembers the key.
 Anyone without the key gets a "locked" page.
 
-**The tunnel address changes whenever the server restarts** (reboot, crash, Windows update). Check `LINKS.txt`
-again if the links stop working. Optional: get a phone notification with the new link each time. Pick a
-hard-to-guess topic name, put it in `certs\ntfy-topic.txt` on the desktop, and subscribe to that topic in the
-free **ntfy** app.
+**The tunnel address changes whenever the server restarts** (reboot, crash, Windows update), so check
+`LINKS.txt` again if the links stop working. Optional: to get new links pushed to your phone, put a hard-to-guess
+topic name in `certs\ntfy-topic.txt` and subscribe to it in the free ntfy app.
 
 `start.bat local` skips the tunnel (same Wi-Fi only, self-signed certificate warning).
 
@@ -58,7 +58,8 @@ free **ntfy** app.
 
 - **Live feed** from the phone.
 - **3D model**: the surface as a blue wireframe grid that grows as you scan. Drag to rotate, right-drag to pan,
-  scroll to zoom. Toggle **Points** and **Camera path**. **Reset view** re-fits the view.
+  scroll to zoom. **Grid lines** on/off; **Surface** under the grid: Off, Blue (see-through), or **Photo** (the real
+  camera colors mapped onto the mesh). Toggle **Points** and **Camera path**. **Reset view** re-fits the view.
 - **Reconstruction** stats: keyframes, backlog, batch time, GPU memory.
 
 Scale is relative: the shape is right, but there are no real-world units yet.
