@@ -1,0 +1,17 @@
+{
+  "name": "buoay-app",
+  "version": "1.0.0",
+  "description": "Submarine hull camera: phone streams to a live dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "selfsigned": "^5.5.0",
+    "ws": "^8.21.3"
+  },
+  "private": true
+}

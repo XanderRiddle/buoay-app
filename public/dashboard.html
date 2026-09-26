@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buoay Dashboard</title>
+<style>
+  :root { --bg: #0f1216; --panel: #181c22; --line: #2a3039; --text: #e6e9ee; --muted: #8b94a3;
+          --ok: #3ecf8e; --rec: #ff5449; --off: #5b6472; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: .02em; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+          background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+  .pill i { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
+  .pill.ok i { background: var(--ok); }
+  .pill.rec i { background: var(--rec); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  main { display: grid; grid-template-columns: 1fr 260px; gap: 16px; padding: 16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .feed { position: relative; background: #000; border: 1px solid var(--line); border-radius: 10px;
+          aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .feed img { width: 100%; height: 100%; object-fit: contain; display: none; }
+  .feed .empty { color: var(--muted); font-size: 15px; }
+  aside { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Buoay Hull Inspection</h1>
+    <span class="pill" id="serverPill"><i></i><span>Server</span></span>
+    <span class="pill" id="cameraPill"><i></i><span>Phone offline</span></span>
+  </header>
+  <main>
+    <div class="feed">
+      <img id="frame" alt="Live feed from phone">
+      <div class="empty" id="empty">Waiting for the phone to start recording...</div>
+    </div>
+    <aside>
+      <h2>Stream</h2>
+      <dl>
+        <dt>FPS</dt><dd id="fps">0</dd>
+        <dt>Resolution</dt><dd id="res">-</dd>
+        <dt>Frame size</dt><dd id="size">-</dd>
+        <dt>Bandwidth</dt><dd id="bw">-</dd>
+        <dt>Frames</dt><dd id="count">0</dd>
+        <dt>Last frame</dt><dd id="last">-</dd>
+      </dl>
+    </aside>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const img = $('frame');
+let frames = 0, windowFrames = 0, windowBytes = 0, lastFrameAt = 0, lastUrl = null;
+
+function setPill(el, cls, text) {
+  el.className = 'pill ' + cls;
+  el.querySelector('span').textContent = text;
+}
+
+function connect() {
+  const ws = new WebSocket(`wss://${location.host}/ws?role=viewer`);
+  ws.binaryType = 'blob';
+  ws.onopen = () => setPill($('serverPill'), 'ok', 'Server connected');
+  ws.onclose = () => {
+    setPill($('serverPill'), '', 'Server offline');
+    setPill($('cameraPill'), '', 'Phone offline');
+    setTimeout(connect, 1500);
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      const s = JSON.parse(ev.data);
+      if (s.type === 'status') {
+        if (!s.cameraConnected) setPill($('cameraPill'), '', 'Phone offline');
+        else if (s.recording) setPill($('cameraPill'), 'rec', 'Phone recording');
+        else setPill($('cameraPill'), 'ok', 'Phone connected, not recording');
+        $('empty').textContent = s.recording ? 'Waiting for frames...' : 'Waiting for the phone to start recording...';
+      }
+      return;
+    }
+    // Binary message = one JPEG frame
+    const url = URL.createObjectURL(ev.data);
+    img.onload = () => {
+      $('res').textContent = `${img.naturalWidth}×${img.naturalHeight}`;
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      lastUrl = url;
+    };
+    img.src = url;
+    img.style.display = 'block';
+    $('empty').style.display = 'none';
+    frames++; windowFrames++; windowBytes += ev.data.size; lastFrameAt = Date.now();
+    $('count').textContent = frames;
+    $('size').textContent = (ev.data.size / 1024).toFixed(0) + ' KB';
+  };
+}
+
+setInterval(() => {
+  $('fps').textContent = windowFrames;
+  $('bw').textContent = windowBytes ? (windowBytes * 8 / 1e6).toFixed(2) + ' Mbps' : '-';
+  windowFrames = 0; windowBytes = 0;
+  if (lastFrameAt) {
+    const ago = (Date.now() - lastFrameAt) / 1000;
+    $('last').textContent = ago < 1 ? 'just now' : ago.toFixed(0) + 's ago';
+    if (ago > 3) { img.style.display = 'none'; $('empty').style.display = 'block'; }
+  }
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>

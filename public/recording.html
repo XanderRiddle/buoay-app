@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Buoay Camera</title>
+<style>
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; color: #fff; }
+  body { background: #2b2f36; display: flex; flex-direction: column; align-items: center; justify-content: center;
+         text-align: center; user-select: none; transition: background .2s; }
+  body.recording { background: #b3261e; }
+  #state { font-size: 12vw; font-weight: 800; letter-spacing: .04em; }
+  #hint { font-size: 4.5vw; opacity: .85; margin-top: 2vh; }
+  #info { position: fixed; bottom: 12px; left: 0; right: 0; font-size: 3.5vw; opacity: .75; }
+  #dot { width: 6vw; height: 6vw; border-radius: 50%; background: #fff; display: inline-block; margin-right: 3vw;
+         vertical-align: middle; opacity: 0; }
+  body.recording #dot { opacity: 1; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  video { position: fixed; top: 12px; right: 12px; width: 28vw; border-radius: 8px; opacity: .8; }
+  canvas { display: none; }
+</style>
+</head>
+<body>
+  <div id="state"><span id="dot"></span><span id="label">NOT RECORDING</span></div>
+  <div id="hint">Tap anywhere to start</div>
+  <div id="info">Connecting...</div>
+  <video id="preview" playsinline muted autoplay></video>
+  <canvas id="canvas"></canvas>
+
+<script>
+// Tunables
+const FPS = 10;              // frames per second sent to the server
+const MAX_WIDTH = 1280;      // frames are scaled down to this width
+const JPEG_QUALITY = 0.7;
+
+const $ = (id) => document.getElementById(id);
+const video = $('preview'), canvas = $('canvas'), ctx = canvas.getContext('2d');
+let ws = null, stream = null, recording = false, timer = null, busy = false, sent = 0, wakeLock = null;
+
+function connect() {
+  ws = new WebSocket(`wss://${location.host}/ws?role=camera`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { info('Connected to server'); sendState(); };
+  ws.onclose = () => { info('Disconnected, retrying...'); setTimeout(connect, 1500); };
+}
+
+function sendState() {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'recording', recording }));
+}
+
+function info(text) { $('info').textContent = text; }
+
+async function startCamera() {
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+function captureFrame() {
+  if (busy || !ws || ws.readyState !== 1 || !video.videoWidth) return;
+  if (ws.bufferedAmount > 512 * 1024) return; // network is behind: drop this frame
+  const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  busy = true;
+  canvas.toBlob(async (blob) => {
+    busy = false;
+    if (!blob || !recording || ws.readyState !== 1) return;
+    ws.send(await blob.arrayBuffer());
+    sent++;
+    info(`Streaming ${canvas.width}x${canvas.height} · ${sent} frames sent`);
+  }, 'image/jpeg', JPEG_QUALITY);
+}
+
+async function start() {
+  try {
+    if (!stream) await startCamera();
+  } catch (e) {
+    info('Camera error: ' + e.message);
+    return;
+  }
+  recording = true;
+  document.body.classList.add('recording');
+  $('label').textContent = 'RECORDING';
+  $('hint').textContent = 'Tap anywhere to stop';
+  timer = setInterval(captureFrame, 1000 / FPS);
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  sendState();
+}
+
+function stop() {
+  recording = false;
+  clearInterval(timer);
+  document.body.classList.remove('recording');
+  $('label').textContent = 'NOT RECORDING';
+  $('hint').textContent = 'Tap anywhere to start';
+  try { wakeLock?.release(); } catch {}
+  wakeLock = null;
+  sendState();
+}
+
+document.body.addEventListener('click', () => (recording ? stop() : start()));
+// Screen lock is released when the tab is hidden; take it back when we return.
+document.addEventListener('visibilitychange', async () => {
+  if (recording && document.visibilityState === 'visible') {
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  }
+});
+
+connect();
+</script>
+</body>
+</html>
