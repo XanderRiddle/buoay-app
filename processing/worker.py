@@ -28,7 +28,7 @@ import time
 import cv2
 import numpy as np
 
-from recon import Reconstructor, VGGTRunner, default_batch, log
+from recon import Reconstructor, VGGTRunner, gpu_profile, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -113,9 +113,9 @@ class KeyframeSelector:
 class ReconThread(threading.Thread):
     """Runs VGGT off the network thread. Commands arrive through a queue so order is kept."""
 
-    def __init__(self, runner, send, batch_size, overlap):
+    def __init__(self, runner, send, profile):
         super().__init__(daemon=True)
-        self.rec = Reconstructor(runner, batch_size=batch_size, overlap=overlap)
+        self.rec = Reconstructor(runner, profile)
         self.runner = runner
         self.send = send              # thread-safe callable(dict)
         self.q = queue.Queue()
@@ -203,10 +203,10 @@ async def live(args):
         loop.call_soon_threadsafe(outbox.put_nowait, msg)
 
     runner = VGGTRunner("cpu" if args.cpu else None)
-    batch, overlap = batch_settings(args, runner)
-    recon = ReconThread(runner, send, batch, overlap)
+    profile = make_profile(args, runner)
+    recon = ReconThread(runner, send, profile)
     recon.start()
-    selector = KeyframeSelector()
+    selector = KeyframeSelector(min_shift=profile["kf_shift"])
 
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
@@ -261,13 +261,15 @@ async def live(args):
             await asyncio.sleep(2)
 
 
-def batch_settings(args, runner):
-    batch, overlap = default_batch(runner.vram_gb)
+def make_profile(args, runner):
+    p = gpu_profile(runner.vram_gb)
     if args.batch:
-        batch = max(3, args.batch)
-        overlap = min(overlap, batch - 1)
-    log(f"batches of {batch} keyframes, {overlap} shared with the previous batch")
-    return batch, overlap
+        p["batch"] = max(3, args.batch)
+        p["min_overlap"] = min(p["min_overlap"], p["batch"] - 2)
+        p["new"] = min(p["new"], p["batch"] - p["min_overlap"])
+    log(f"up to {p['batch']} photos per batch, new batch every {p['new']} keyframes, "
+        f"keyframe every {int(p['kf_shift'] * 100)}% of frame width")
+    return p
 
 
 def read_key():
@@ -291,8 +293,7 @@ def offline(args):
         sys.exit(f"Need at least 2 images in {args.images}")
     log(f"{len(paths)} images from {args.images}")
     runner = VGGTRunner("cpu" if args.cpu else None)
-    batch, overlap = batch_settings(args, runner)
-    rec = Reconstructor(runner, batch_size=batch, overlap=overlap)
+    rec = Reconstructor(runner, make_profile(args, runner))
     for i, p in enumerate(paths):
         bgr = cv2.imread(p)
         if bgr is None:

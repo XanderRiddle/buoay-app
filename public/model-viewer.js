@@ -1,5 +1,7 @@
 // 3D model viewer for buoay-app. Used by the dashboard and by the offline preview.
-// Draws the reconstructed surface as a wireframe grid, plus optional points and camera path.
+// Draws the reconstructed surface as a wireframe grid over an optional surface fill
+// (translucent blue, or "photo": each cell colored from the camera images), plus optional
+// points and camera path.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
@@ -23,9 +25,11 @@ export function createModelViewer(container) {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
 
-  const groups = { grid: new THREE.Group(), points: new THREE.Group(), cams: new THREE.Group() };
+  const groups = { lines: new THREE.Group(), surface: new THREE.Group(), points: new THREE.Group(), cams: new THREE.Group() };
   Object.values(groups).forEach((g) => scene.add(g));
   groups.points.visible = false;
+  let surfaceMode = 'blue'; // 'off' | 'blue' | 'photo'
+  const fills = { blue: null, photo: null };
 
   let userMoved = false; // keep auto-fitting the view as the model grows, until the user grabs it
   controls.addEventListener('start', () => { userMoved = true; });
@@ -51,12 +55,21 @@ export function createModelViewer(container) {
     for (const child of [...group.children]) {
       group.remove(child);
       child.geometry?.dispose();
+      child.material?.map?.dispose();
       child.material?.dispose();
     }
   }
 
+  function applySurfaceMode() {
+    groups.surface.visible = surfaceMode !== 'off';
+    if (fills.blue) fills.blue.visible = surfaceMode === 'blue';
+    if (fills.photo) fills.photo.visible = surfaceMode === 'photo';
+  }
+
   function buildGrid(g) {
-    clear(groups.grid);
+    clear(groups.lines);
+    clear(groups.surface);
+    fills.blue = fills.photo = null;
     if (!g) return null;
     const { nu, nv, cell } = g;
     const O = new THREE.Vector3(...g.origin), U = new THREE.Vector3(...g.u),
@@ -85,22 +98,63 @@ export function createModelViewer(container) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     const lineGeo = geo.clone(); lineGeo.setIndex(lines);
-    groups.grid.add(new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: COLORS.grid })));
-    const fillGeo = geo.clone(); fillGeo.setIndex(tris);
-    groups.grid.add(new THREE.Mesh(fillGeo, new THREE.MeshBasicMaterial({
-      color: COLORS.fill, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false })));
+    groups.lines.add(new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: COLORS.grid })));
+
+    const blueGeo = geo.clone(); blueGeo.setIndex(tris);
+    fills.blue = new THREE.Mesh(blueGeo, new THREE.MeshBasicMaterial({
+      color: COLORS.fill, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false }));
+    groups.surface.add(fills.blue);
+
+    // "Photo" surface: an image of the average camera color over the surface,
+    // 4x finer than the grid, stretched across the mesh
+    if (g.texture) {
+      const { w, h, sub } = g.texture;
+      const uv = new Float32Array(nu * nv * 2);
+      for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+        uv[idx(i, j) * 2] = (i * sub + 0.5) / w;
+        uv[idx(i, j) * 2 + 1] = (j * sub + 0.5) / h;
+      }
+      const photoGeo = geo.clone(); photoGeo.setIndex(tris);
+      photoGeo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      const tex = new THREE.TextureLoader().load(g.texture.png);
+      tex.flipY = false;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.magFilter = THREE.LinearFilter;
+      fills.photo = new THREE.Mesh(photoGeo, new THREE.MeshBasicMaterial({
+        map: tex, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 })); // keeps grid lines on top
+      groups.surface.add(fills.photo);
+    }
     geo.dispose();
+    applySurfaceMode();
 
     const center = O.clone().addScaledVector(U, (nu - 1) * cell / 2).addScaledVector(V, (nv - 1) * cell / 2);
     return { center, normal: N, size: Math.max(nu, nv) * cell };
   }
 
-  function buildPoints(pts) {
+  const b64 = (s) => Uint8Array.from(atob(s), (ch) => ch.charCodeAt(0));
+
+  // Points arrive packed: positions as 16-bit steps within [min, max], colors as bytes.
+  function unpackPoints(pts) {
+    if (pts.p) return { p: new Float32Array(pts.p), c: new Float32Array(pts.c) }; // older format
+    const n = pts.n || 0;
+    const q = new Uint16Array(b64(pts.q).buffer), c8 = b64(pts.c8);
+    const p = new Float32Array(n * 3), c = new Float32Array(n * 3);
+    for (let i = 0; i < n * 3; i++) {
+      const a = i % 3;
+      p[i] = pts.min[a] + (q[i] / 65535) * (pts.max[a] - pts.min[a]);
+      c[i] = c8[i] / 255;
+    }
+    return { p, c };
+  }
+
+  function buildPoints(packed) {
     clear(groups.points);
-    if (!pts || !pts.p.length) return;
+    if (!packed || !(packed.n || packed.p?.length)) return;
+    const pts = unpackPoints(packed);
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pts.p, 3));
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(pts.c, 3));
+    geo.setAttribute('position', new THREE.BufferAttribute(pts.p, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(pts.c, 3));
     geo.computeBoundingSphere();
     const r = geo.boundingSphere.radius || 1;
     groups.points.add(new THREE.Points(geo, new THREE.PointsMaterial({ size: r / 250, vertexColors: true })));
@@ -153,5 +207,7 @@ export function createModelViewer(container) {
     },
     setVisible(name, on) { groups[name].visible = on; },
     isVisible(name) { return groups[name].visible; },
+    setSurface(mode) { surfaceMode = mode; applySurfaceMode(); },
+    getSurface() { return surfaceMode; },
   };
 }
