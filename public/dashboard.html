@@ -37,6 +37,14 @@
   dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
   .stats { display: grid; grid-template-columns: 1fr 1fr; }
   .stats dl + dl { border-left: 1px solid var(--line); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 20px; width: min(360px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  dialog p { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+  dialog img { display: block; width: 100%; background: #fff; border-radius: 8px; margin-bottom: 12px; }
+  dialog input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; margin-bottom: 10px; }
+  dialog .row { display: flex; gap: 8px; }
+  dialog .note { margin: 10px 0 0; }
   #reconMsg { padding: 0 14px 12px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
 </style>
 <script type="importmap">
@@ -49,7 +57,16 @@
     <span class="pill" id="serverPill"><i></i><span>Server</span></span>
     <span class="pill" id="cameraPill"><i></i><span>Phone offline</span></span>
     <span class="pill" id="reconPill"><i></i><span>3D worker offline</span></span>
+    <button class="t" id="phoneBtn" style="margin-left:auto">Phone link</button>
   </header>
+  <dialog id="phoneDlg">
+    <h3>Open the camera page on the phone</h3>
+    <p>Scan with the phone's camera, or send yourself the link.</p>
+    <img id="qr" alt="QR code for the phone link">
+    <input id="phoneLink" readonly>
+    <div class="row"><button class="t on" id="copyLink">Copy link</button><button class="t" id="closeDlg">Close</button></div>
+    <p class="note" id="linkNote"></p>
+  </dialog>
   <main>
     <section class="card">
       <div class="card-head"><h2>Live feed</h2></div>
@@ -118,6 +135,23 @@ document.querySelectorAll('[data-layer]').forEach((b) => {
   };
 });
 $('resetView').onclick = () => viewer.resetView();
+
+$('phoneBtn').onclick = async () => {
+  const r = await fetch('/api/links').then((x) => x.json()).catch(() => ({}));
+  if (!r.phone) return;
+  $('phoneLink').value = r.phone;
+  $('qr').src = '/api/phone-qr.svg?t=' + Date.now();
+  $('linkNote').textContent = r.public
+    ? 'Works from any network. The link changes if the desktop server restarts (check LINKS.txt).'
+    : 'Local network link: the phone must be on the same Wi-Fi as the server.';
+  $('phoneDlg').showModal();
+};
+$('closeDlg').onclick = () => $('phoneDlg').close();
+$('copyLink').onclick = async () => {
+  try { await navigator.clipboard.writeText($('phoneLink').value); $('copyLink').textContent = 'Copied'; }
+  catch { $('phoneLink').select(); }
+  setTimeout(() => ($('copyLink').textContent = 'Copy link'), 1500);
+};
 
 function setPill(el, cls, text) {
   el.className = 'pill ' + cls;

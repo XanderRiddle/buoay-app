@@ -1,4 +1,6 @@
 node_modules/
 certs/
+tools/
+LINKS.txt
 processing/scans/
 processing/output/

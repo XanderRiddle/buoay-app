@@ -1,20 +1,20 @@
 # processing: 3D reconstruction
 
-- `worker.py`: the live reconstruction worker (started by `start.bat` in the main folder). Also `--images <folder>` to rebuild a model from photos.
+- `worker.py`: the live reconstruction worker (started by `start.bat` in the main folder). Also `--images <folder>` to rebuild a model from photos. Batch size is picked from GPU memory (10 photos on an 8 GB card, 6 on 4 GB).
 - `recon.py`: VGGT wrapper, batch stitching, grid fitting.
 - `vggt_smoke_test.py`: one-off test of VGGT on a few photos (memory + timing).
 
-`setup.bat` installs everything for all three. If you set up before the live worker existed, run it again (it adds the `websockets` package).
+`setup.bat` installs everything for all three into `%LOCALAPPDATA%\buoay-app\venv` (outside OneDrive, one per computer). Run it again on any machine that was set up before (it also removes the old `.venv` from this folder).
 
 # VGGT smoke test
 
-Checks whether VGGT (image -> 3D model) runs on the GTX 1650 laptop, and how much memory and time it needs.
+Checks whether VGGT (image -> 3D model) runs on this computer's GPU, and how much memory and time it needs.
 
 ## 1. One-time setup
 
 1. Update the NVIDIA driver (GeForce Experience or nvidia.com/drivers). No NVIDIA GPU? Skip this; setup installs the CPU version instead.
 2. Install **Python 3.11** from python.org. On the first installer screen, tick **"Add python.exe to PATH"**. (Python from MSYS2 / MinGW / Git Bash will not work: PyTorch doesn't support it. `setup.bat` checks for this.)
-3. Double-click **`setup.bat`** in this folder. It downloads ~2.5 GB and takes a while. At the end it should print `CUDA GPU found: NVIDIA GeForce GTX 1650`.
+3. Double-click **`setup.bat`** in this folder. It downloads ~2.5 GB and takes a while. At the end it should print `CUDA GPU found: NVIDIA GeForce ...` with your card's name.
 
 ## 2. Take test photos
 

@@ -28,7 +28,7 @@ import time
 import cv2
 import numpy as np
 
-from recon import Reconstructor, VGGTRunner, log
+from recon import Reconstructor, VGGTRunner, default_batch, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -113,9 +113,9 @@ class KeyframeSelector:
 class ReconThread(threading.Thread):
     """Runs VGGT off the network thread. Commands arrive through a queue so order is kept."""
 
-    def __init__(self, runner, send, batch_size):
+    def __init__(self, runner, send, batch_size, overlap):
         super().__init__(daemon=True)
-        self.rec = Reconstructor(runner, batch_size=batch_size)
+        self.rec = Reconstructor(runner, batch_size=batch_size, overlap=overlap)
         self.runner = runner
         self.send = send              # thread-safe callable(dict)
         self.q = queue.Queue()
@@ -203,14 +203,16 @@ async def live(args):
         loop.call_soon_threadsafe(outbox.put_nowait, msg)
 
     runner = VGGTRunner("cpu" if args.cpu else None)
-    recon = ReconThread(runner, send, args.batch)
+    batch, overlap = batch_settings(args, runner)
+    recon = ReconThread(runner, send, batch, overlap)
     recon.start()
     selector = KeyframeSelector()
 
     ssl_ctx = ssl.create_default_context()
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE   # our own self-signed certificate
-    url = args.server.rstrip("/") + "/ws?role=worker"
+    key = args.key or read_key()
+    url = args.server.rstrip("/") + "/ws?role=worker" + (f"&key={key}" if key else "")
 
     recording = False
     kf_count = 0
@@ -259,6 +261,26 @@ async def live(args):
             await asyncio.sleep(2)
 
 
+def batch_settings(args, runner):
+    batch, overlap = default_batch(runner.vram_gb)
+    if args.batch:
+        batch = max(3, args.batch)
+        overlap = min(overlap, batch - 1)
+    log(f"batches of {batch} keyframes, {overlap} shared with the previous batch")
+    return batch, overlap
+
+
+def read_key():
+    path = os.path.join(HERE, "..", "certs", "access-key.txt")
+    for _ in range(30):  # the server writes it on first start; give it a moment
+        if os.path.exists(path):
+            with open(path) as f:
+                return f.read().strip()
+        time.sleep(1)
+    log("no access key file found; connecting without a key")
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Offline mode
 # --------------------------------------------------------------------------- #
@@ -269,7 +291,8 @@ def offline(args):
         sys.exit(f"Need at least 2 images in {args.images}")
     log(f"{len(paths)} images from {args.images}")
     runner = VGGTRunner("cpu" if args.cpu else None)
-    rec = Reconstructor(runner, batch_size=args.batch)
+    batch, overlap = batch_settings(args, runner)
+    rec = Reconstructor(runner, batch_size=batch, overlap=overlap)
     for i, p in enumerate(paths):
         bgr = cv2.imread(p)
         if bgr is None:
@@ -346,7 +369,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", default="wss://localhost:8443", help="Node server address")
     ap.add_argument("--images", help="offline mode: folder of photos to reconstruct")
-    ap.add_argument("--batch", type=int, default=6, help="photos per VGGT batch (default 6, lowered automatically if the GPU runs out of memory)")
+    ap.add_argument("--batch", type=int, help="photos per VGGT batch (default: picked from GPU memory, 10 on an 8 GB card; lowered automatically if it runs out)")
+    ap.add_argument("--key", help="access key (default: read from ../certs/access-key.txt, written by the server)")
     ap.add_argument("--cpu", action="store_true", help="run VGGT on the CPU")
     args = ap.parse_args()
     if args.images:

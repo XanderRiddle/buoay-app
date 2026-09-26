@@ -1,6 +1,6 @@
 @echo off
 REM One-time setup for the VGGT processing test. Run from this folder.
-REM Safe to rerun: it rebuilds .venv from scratch each time (downloads are cached).
+REM Safe to rerun: it rebuilds the environment from scratch each time (downloads are cached).
 cd /d "%~dp0"
 if not exist test_images mkdir test_images
 
@@ -18,17 +18,26 @@ echo Using Python: %PY%
 %PY% --version
 
 REM --- Fresh virtual environment ---
+REM Lives outside OneDrive (per computer) so gigabytes of PyTorch don't sync between machines.
+set "VENV=%LOCALAPPDATA%\buoay-app\venv"
 if exist .venv (
-  echo Removing old .venv...
+  echo Removing the old .venv inside OneDrive. It now lives in %VENV%
   rmdir /s /q .venv
 )
-%PY% -m venv .venv || goto :fail
-call .venv\Scripts\activate.bat
+if exist "%VENV%" (
+  echo Removing old environment...
+  rmdir /s /q "%VENV%"
+)
+%PY% -m venv "%VENV%" || goto :fail
+call "%VENV%\Scripts\activate.bat"
 python -m pip install --upgrade pip
 
 REM --- GPU build of PyTorch if an NVIDIA driver is present, otherwise the CPU build ---
+REM Checks Windows' own list of graphics cards, so it works even when nvidia-smi isn't on PATH.
 set "TORCH_INDEX=https://download.pytorch.org/whl/cpu"
 where nvidia-smi >nul 2>nul && set "TORCH_INDEX=https://download.pytorch.org/whl/cu126"
+powershell -NoProfile -Command "if ((Get-CimInstance Win32_VideoController).Name -match 'NVIDIA') { exit 0 } else { exit 1 }" >nul 2>nul && set "TORCH_INDEX=https://download.pytorch.org/whl/cu126"
+if /i "%~1"=="cpu" set "TORCH_INDEX=https://download.pytorch.org/whl/cpu"
 echo.
 echo Installing PyTorch from %TORCH_INDEX% ...
 pip install torch torchvision --index-url %TORCH_INDEX% || goto :fail

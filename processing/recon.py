@@ -32,6 +32,19 @@ def log(msg):
 # VGGT model
 # --------------------------------------------------------------------------- #
 
+def default_batch(vram_gb):
+    """Photos per batch and overlap for the GPU size (weights take ~2.6 GB, ~0.17 GB per photo)."""
+    if vram_gb is None:
+        return 6, 2          # CPU: keep batches small so updates still come regularly
+    if vram_gb >= 11:
+        return 16, 4
+    if vram_gb >= 7.5:
+        return 10, 3         # e.g. RTX 3070 Ti 8 GB (leaves room for the desktop's own display)
+    if vram_gb >= 5.5:
+        return 8, 2
+    return 6, 2              # 4 GB cards
+
+
 class VGGTRunner:
     """Loads VGGT once and turns a list of RGB images into per-pixel 3D points."""
 
@@ -54,17 +67,23 @@ class VGGTRunner:
         model.point_head = None   # points come from depth + camera instead
         model.eval()
 
+        self.vram_gb = None
         if self.device.type == "cuda":
-            # Fit in 4 GB: big transformer in float16, small heads in float32,
+            props = torch.cuda.get_device_properties(self.device)
+            self.vram_gb = props.total_memory / 1024**3
+            # RTX 30xx and newer support bfloat16 (more stable); older cards use float16.
+            dtype = torch.bfloat16 if props.major >= 8 else torch.float16
+            log(f"GPU: {props.name}, {self.vram_gb:.1f} GB, using {str(dtype).split('.')[-1]}")
+            # Big transformer in 16-bit (halves its memory), small heads in float32,
             # and the full-resolution depth head one photo at a time.
-            model.aggregator.half()
+            model.aggregator.to(dtype)
             agg_forward = model.aggregator.forward
 
-            def agg_forward_fp16(images):
-                tokens, start = agg_forward(images.half())
+            def agg_forward_16(images):
+                tokens, start = agg_forward(images.to(dtype))
                 return [x.float() if x is not None else None for x in tokens], start
 
-            model.aggregator.forward = agg_forward_fp16
+            model.aggregator.forward = agg_forward_16
             depth_forward = model.depth_head.forward
             model.depth_head.forward = lambda *a, **k: depth_forward(*a, **{**k, "frames_chunk_size": 1})
 
