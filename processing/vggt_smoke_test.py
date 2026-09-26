@@ -38,8 +38,12 @@ except ImportError:
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
 
+LOG_LINES = []
+
+
 def log(msg):
     print(msg, flush=True)
+    LOG_LINES.append(str(msg))
 
 
 def gb(n_bytes):
@@ -254,7 +258,10 @@ def main():
     log("                     (a flat wall should be a few % or less)")
     log(f"  Saved:             {os.path.join(args.out, 'points.ply')}")
     log(f"                     {os.path.join(args.out, 'preview.html')}  <- open this in a browser")
+    log(f"                     {os.path.join(args.out, 'results.txt')}   <- this summary")
     log("=" * 60)
+    with open(os.path.join(args.out, "results.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(LOG_LINES) + "\n")
 
 
 if __name__ == "__main__":
