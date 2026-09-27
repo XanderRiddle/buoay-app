@@ -13,6 +13,7 @@ new batch up with everything built so far (the Umeyama method).
 """
 
 import base64
+import collections
 import time
 
 import warnings
@@ -142,11 +143,20 @@ class VGGTRunner:
         depth = pred["depth"][0].float().cpu().numpy()            # (S, H, W, 1)
         conf = pred["depth_conf"][0].float().cpu().numpy()        # (S, H, W)
         pts = self._unproject(depth, extr, intr[0].cpu().numpy()) # (S, H, W, 3)
+
         colors = images.permute(0, 2, 3, 1).numpy()
 
         del pred
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+
+        # Camera intrinsics in the ORIGINAL photo's pixels (undo the resize + crop), so the
+        # full-resolution keyframe photos can be projected onto the model for the texture.
+        h0, w0 = rgb_list[0].shape[:2]
+        new_h = int(round(h0 * VGGT_WIDTH / w0 / PATCH) * PATCH)
+        top = (new_h - VGGT_WIDTH) // 2 if new_h > VGGT_WIDTH else 0
+        sx, sy = w0 / VGGT_WIDTH, h0 / new_h
+        intr = intr[0].cpu().numpy()
 
         frames = []
         for i in range(len(rgb_list)):
@@ -154,8 +164,12 @@ class VGGTRunner:
             c2w = np.eye(4)
             c2w[:3, :3] = R.T
             c2w[:3, 3] = -R.T @ t
+            k = intr[i]
+            K = np.array([[k[0, 0] * sx, 0, k[0, 2] * sx],
+                          [0, k[1, 1] * sy, (k[1, 2] + top) * sy],
+                          [0, 0, 1]])
             frames.append({"points": pts[i].astype(np.float32), "conf": conf[i].astype(np.float32),
-                           "color": colors[i], "cam_to_world": c2w})
+                           "color": colors[i], "cam_to_world": c2w, "K": K})
         return frames
 
 
@@ -193,6 +207,86 @@ def robust_similarity(src, dst, weights, iters=4):
     return s, R, t, float(np.median(res[keep])), float(keep.mean())
 
 
+try:
+    from scipy.spatial import cKDTree
+except ImportError:  # ICP refinement is skipped without scipy
+    cKDTree = None
+
+
+def _rodrigues(w):
+    th = np.linalg.norm(w)
+    if th < 1e-12:
+        return np.eye(3)
+    k = w / th
+    Kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(th) * Kx + (1 - np.cos(th)) * Kx @ Kx
+
+
+def icp_refine(src, tgt, anchor_src, anchor_dst, iters=10):
+    """
+    Loop-closure nudge for a new batch that revisits an area scanned earlier.
+      src          new batch points (already placed by the overlap alignment)
+      tgt          the OLDER surface it revisits (not the frames it was just chained to)
+      anchor_*     exact pixel matches with the shared overlap photos (where it must stay attached)
+    Solves for one small rigid correction that pulls src onto the old surface (point-to-plane)
+    while the anchors resist, so the revisit meets the old layer halfway instead of doubling,
+    without tearing away from its neighbors. Sliding along a flat wall is damped.
+    Returns (R, t, before, after) with before/after = median gap to the old surface, or None.
+    """
+    tree = cKDTree(tgt)
+    extent = np.linalg.norm(np.ptp(src, axis=0))
+    normals = np.full(tgt.shape, np.nan, np.float64)
+    R, t = np.eye(3), np.zeros(3)
+    cur = src.astype(np.float64).copy()
+    anc = anchor_src.astype(np.float64).copy()
+    max_d = 0.05 * extent
+    before = None
+    for _ in range(iters):
+        d, idx = tree.query(cur, k=1, distance_upper_bound=max_d)
+        ok = np.isfinite(d)
+        if ok.sum() < 500:
+            return None
+        med = np.median(d[ok])
+        if before is None:
+            before = med
+        keep = ok & (d < max(3 * med, 1e-9))
+        p, ti = cur[keep], idx[keep]
+        need = np.unique(ti[np.isnan(normals[ti, 0])])
+        if len(need):  # surface normals from the 12 nearest points
+            _, nb = tree.query(tgt[need], k=12)
+            nbp = tgt[nb] - tgt[nb].mean(1, keepdims=True)
+            normals[need] = np.linalg.eigh(np.einsum("nki,nkj->nij", nbp, nbp))[1][:, :, 0]
+        q, n = tgt[ti], normals[ti]
+        r = np.einsum("ij,ij->i", p - q, n)
+        w = 1 / np.maximum(1, np.abs(r) / (1.5 * np.median(np.abs(r)) + 1e-12))   # Huber
+        A1 = np.hstack([np.cross(p, n), n]) * w[:, None]
+        b1 = -r * w
+        # anchors: point-to-point, x/y/z rows; total weight equal to the surface term
+        wa = np.sqrt(w.sum() / max(len(anc), 1) / 3)
+        e = anc - anchor_dst
+        rows = []
+        for axis in range(3):
+            unit = np.zeros(3); unit[axis] = 1
+            rows.append(np.hstack([np.cross(anc, unit), np.tile(unit, (len(anc), 1))]))
+        A2 = np.vstack(rows) * wa
+        b2 = -np.concatenate([e[:, 0], e[:, 1], e[:, 2]]) * wa
+        A, b = np.vstack([A1, A2]), np.concatenate([b1, b2])
+        H = A.T @ A
+        H += np.eye(6) * 1e-3 * np.trace(H) / 6
+        x = np.linalg.solve(H, A.T @ b)
+        dR = _rodrigues(x[:3])
+        cur = cur @ dR.T + x[3:]
+        anc = anc @ dR.T + x[3:]
+        R, t = dR @ R, dR @ t + x[3:]
+        max_d = min(max_d, 5 * med)
+        if np.linalg.norm(x[3:]) < 1e-5 * extent and np.linalg.norm(x[:3]) < 1e-5:
+            break
+    d, _ = tree.query(cur, k=1, distance_upper_bound=0.05 * extent)
+    ok = np.isfinite(d)
+    after = np.median(d[ok]) if ok.any() else np.inf
+    return R, t, before, after
+
+
 def apply_sim(sim, pts):
     s, R, t = sim
     return (s * (R @ pts.reshape(-1, 3).T)).T.reshape(pts.shape) + t
@@ -202,7 +296,7 @@ def apply_sim(sim, pts):
 # Grid surface
 # --------------------------------------------------------------------------- #
 
-def fit_grid(points, colors=None, target_cells=48, min_pts=4):
+def fit_grid(points, colors=None, views=None, cache=None, target_cells=48, min_pts=3):
     """
     Fits a heightfield grid to the points: find the dominant plane, bin points
     over it, and keep the median height per cell. Good for walls and hull sides.
@@ -251,20 +345,149 @@ def fit_grid(points, colors=None, target_cells=48, min_pts=4):
     grid = grid.reshape(nv, nu)
 
     grid = _clean_grid(grid)
-    tex, img, have = _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid) if colors is not None else (None, None, None)
     origin = center + u0 * u_ax + v0 * v_ax
+    # averaged point-color texture: always built, it's what the surface check was tuned on
+    tex, img, have = _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid) if colors is not None else (None, None, None)
     try:  # red / yellow highlights; never let them break the model update
         anomalies = anomaly.analyze(grid, cell, img, have, TEX_SUB)
     except Exception as e:
         log(f"surface check failed: {e!r}")
         anomalies = None
+    # what the dashboard shows: the sharp texture painted from the full-resolution keyframe photos
+    if views:
+        try:
+            sharp = _projected_texture(origin, u_ax, v_ax, n_ax, cell, nu, nv, grid, views, cache)
+            if sharp is not None:
+                tex = sharp
+        except Exception as e:  # never let the texture break the model
+            log(f"photo texture failed ({e!r}); using point colors")
     return {"origin": origin.tolist(), "u": u_ax.tolist(), "v": v_ax.tolist(), "n": n_ax.tolist(),
             "cell": float(cell), "nu": nu, "nv": nv,
             "h": [None if np.isnan(x) else round(float(x), 5) for x in grid.ravel()],
             "texture": tex, "anomalies": anomalies}
 
 
-TEX_SUB = 4  # photo texture pixels per grid cell (per side)
+TEX_SUB = 4  # fallback texture (averaged point colors): pixels per grid cell
+
+
+def _projected_texture(origin, u_ax, v_ax, n_ax, cell, nu, nv, grid, views, cache):
+    """
+    Sharp photo texture: every part of the surface is painted from the single best keyframe
+    photo that saw it (full resolution, near the image center, facing the surface, close by),
+    instead of averaging blurry point colors from many frames.
+    views: [(kf_id, cam_to_world 4x4, K 3x3 in photo pixels, jpeg bytes, (h, w))]
+    """
+    if nu < 2 or nv < 2:
+        return None
+    T = int(max(4, min(40, 2048 // max(nu - 1, nv - 1))))   # texture pixels per grid cell (long side <= 2048)
+    W, H = (nu - 1) * T + 1, (nv - 1) * T + 1
+    valid = ~np.isnan(grid)
+
+    # 3D position of every texture pixel: bilinear heights between grid nodes
+    X, Y = np.meshgrid(np.arange(W) / T, np.arange(H) / T)
+    i0 = np.clip(np.floor(X).astype(int), 0, nu - 2)
+    j0 = np.clip(np.floor(Y).astype(int), 0, nv - 2)
+    fx, fy = X - i0, Y - j0
+    acc = np.zeros_like(X)
+    wsum = np.zeros_like(X)
+    for di, dj, w in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)), (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+        hv = grid[j0 + dj, i0 + di]
+        ok = ~np.isnan(hv)
+        acc += np.where(ok, hv * w, 0)
+        wsum += np.where(ok, w, 0)
+    node_i = np.clip(np.round(X).astype(int), 0, nu - 1)
+    node_j = np.clip(np.round(Y).astype(int), 0, nv - 1)
+    inside = valid[node_j, node_i] & (wsum > 1e-6)
+    h = np.where(inside, acc / np.maximum(wsum, 1e-9), 0)
+    P = (origin[None, None] + (X * cell)[..., None] * u_ax + (Y * cell)[..., None] * v_ax
+         + h[..., None] * n_ax).astype(np.float32)
+
+    # best photo for each grid node
+    nodes = np.argwhere(valid)                                   # (N, 2) as (j, i)
+    Pn = origin + (nodes[:, 1:2] * cell) * u_ax + (nodes[:, 0:1] * cell) * v_ax + grid[valid][:, None] * n_ax
+    scores = np.full((len(views), len(nodes)), np.inf)
+    for vi, (_, c2w, K, _, (ih, iw)) in enumerate(views):
+        Rw, C = c2w[:3, :3], c2w[:3, 3]
+        pc = (Pn - C) @ Rw                                       # world -> camera
+        z = pc[:, 2]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            px = K[0, 0] * pc[:, 0] / z + K[0, 2]
+            py = K[1, 1] * pc[:, 1] / z + K[1, 2]
+        ok = (z > 0) & (px > 0.03 * iw) & (px < 0.97 * iw) & (py > 0.03 * ih) & (py < 0.97 * ih)
+        off_center = np.hypot((px - iw / 2) / iw, (py - ih / 2) / ih)
+        ray = (Pn - C) / np.maximum(np.linalg.norm(Pn - C, axis=1, keepdims=True), 1e-9)
+        facing = np.abs(ray @ n_ax)
+        dist = np.linalg.norm(Pn - C, axis=1)
+        scores[vi] = np.where(ok, off_center + 0.4 * (1 - facing) + 0.1 * dist / max(np.median(dist), 1e-9), np.inf)
+    best_node = np.argmin(scores, axis=0)
+    best_node[~np.isfinite(scores.min(axis=0))] = -1
+    node_view = np.full((nv, nu), -1)
+    node_view[valid] = best_node
+    texel_view = np.where(inside, node_view[node_j, node_i], -1)
+
+    # sample each photo for the texels it won
+    img = np.zeros((H, W, 3), np.uint8)
+    got = np.zeros((H, W), bool)
+    flat_view = texel_view.ravel()
+    order = np.argsort(flat_view, kind="stable")
+    sorted_view = flat_view[order]
+    starts = np.searchsorted(sorted_view, np.arange(len(views) + 1))
+    Pflat = P.reshape(-1, 3)
+    for vi in range(len(views)):
+        idx_all = order[starts[vi]:starts[vi + 1]]
+        if len(idx_all) == 0:
+            continue
+        kf_id, c2w, K, jpeg, (ih, iw) = views[vi]
+        photo = cache.get(kf_id) if cache is not None else None
+        if photo is None:
+            photo = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+            if cache is not None:
+                cache.put(kf_id, photo)
+        pc = (Pflat[idx_all] - c2w[:3, 3]) @ c2w[:3, :3]
+        mx = (K[0, 0] * pc[:, 0] / pc[:, 2] + K[0, 2]).astype(np.float32)
+        my = (K[1, 1] * pc[:, 1] / pc[:, 2] + K[1, 2]).astype(np.float32)
+        sample = _remap_points(photo, mx, my)
+        okp = (mx >= 0) & (mx <= iw - 1) & (my >= 0) & (my <= ih - 1)
+        idx = idx_all[okp]
+        img.reshape(-1, 3)[idx] = sample[okp]
+        got.reshape(-1)[idx] = True
+
+    holes = (inside & ~got).astype(np.uint8)
+    if holes.any() and got.any():
+        img = cv2.inpaint(img, holes, 3, cv2.INPAINT_TELEA)
+    ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])   # img is already BGR
+    return {"w": W, "h": H, "sub": T,
+            "png": "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()}
+
+
+def _remap_points(photo, mx, my, width=1024):
+    """Sample a photo at a list of pixel positions (cv2.remap needs 2D maps under 32767 per side)."""
+    n = len(mx)
+    rows = -(-n // width)
+    pad = rows * width - n
+    mxp = np.concatenate([mx, np.full(pad, -1, np.float32)]).reshape(rows, width)
+    myp = np.concatenate([my, np.full(pad, -1, np.float32)]).reshape(rows, width)
+    out = cv2.remap(photo, mxp, myp, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+    return out.reshape(-1, 3)[:n]
+
+
+class PhotoCache:
+    """Recently decoded keyframe photos, so rebuilding the texture doesn't re-decode everything."""
+
+    def __init__(self, size=80):
+        self.size, self.items = size, collections.OrderedDict()
+
+    def get(self, k):
+        if k in self.items:
+            self.items.move_to_end(k)
+            return self.items[k]
+        return None
+
+    def put(self, k, v):
+        self.items[k] = v
+        self.items.move_to_end(k)
+        while len(self.items) > self.size:
+            self.items.popitem(last=False)
 
 
 def _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid):
@@ -328,11 +551,12 @@ def _clean_grid(grid):
         lone = (stats[labels, cv2.CC_STAT_AREA] <= 2) & (odd > 0)
         edge = np.isfinite(grid) & (np.isnan(nb).sum(0) > 0)
         grid = np.where(lone | (edge & (odd > 0)), np.nan, grid)
-        # 2. fill small holes (cells with >= 5 valid neighbors), twice
-        for _ in range(2):
+        # 2. fill holes from the edges inward (cells with >= 4 of 8 neighbors), up to 4 cells deep;
+        #    only fills gaps surrounded by surface, never grows the outline much
+        for _ in range(4):
             nb = _neighbors(grid)
             count = np.sum(~np.isnan(nb), axis=0)
-            fill = np.isnan(grid) & (count >= 5)
+            fill = np.isnan(grid) & (count >= 4)
             grid = np.where(fill, np.nanmean(nb, axis=0), grid)
         # 3. light smoothing
         nb = _neighbors(grid)
@@ -353,7 +577,7 @@ class Reconstructor:
     (the first batch's frame).
     """
 
-    def __init__(self, runner, profile=None, conf_percentile=50):
+    def __init__(self, runner, profile=None, conf_percentile=50, model_conf_percentile=30):
         self.runner = runner
         p = profile or gpu_profile(getattr(runner, "vram_gb", None))
         self.batch_size = p["batch"]
@@ -362,7 +586,9 @@ class Reconstructor:
         self.first_min = p["first"]
         if hasattr(runner, "depth_chunk"):
             runner.depth_chunk = p["depth_chunk"]
-        self.conf_percentile = conf_percentile
+        self.conf_percentile = conf_percentile          # for lining batches up: only the surest points
+        self.model_conf_percentile = model_conf_percentile  # for the model: keep more, fewer holes
+        self.photos = PhotoCache()
         self.reset()
 
     def reset(self):
@@ -374,6 +600,8 @@ class Reconstructor:
         self.rejected = 0
         self.last_batch_seconds = None
         self.last_error = None
+        self.photos = PhotoCache()
+        self._anchor = None
 
     # -- input ------------------------------------------------------------- #
     def add_keyframe(self, kf_id, rgb):
@@ -427,6 +655,7 @@ class Reconstructor:
             if sim is None:
                 self.rejected += 1
                 return False
+            sim = self._refine(sim, out, overlap_ids)
 
         for kf_id, f, rgb in zip(batch_ids, out, batch_rgb):
             if kf_id in self.frames:
@@ -438,11 +667,17 @@ class Reconstructor:
             st = STORE_STRIDE
             pts = apply_sim(sim, f["points"][::st, ::st]).astype(np.float32)
             conf, color = f["conf"][::st, ::st], f["color"][::st, ::st]
-            good = (conf >= np.percentile(conf, self.conf_percentile)) & np.isfinite(pts).all(-1)
+            good = (conf >= np.percentile(conf, self.model_conf_percentile)) & np.isfinite(pts).all(-1)
+            photo = None
+            if f.get("K") is not None:
+                ok, enc = cv2.imencode(".jpg", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
+                photo = enc.tobytes() if ok else None
             self.frames[kf_id] = {
                 "points": pts, "conf": conf, "color": color, "cam_to_world": c2w,
                 # confident points cached once, so rebuilding the grid stays quick as the model grows
                 "good_pts": pts[good], "good_cols": color[good].astype(np.float32),
+                # full-resolution photo + camera, for the sharp photo texture
+                "K": f.get("K"), "photo": photo, "size": rgb.shape[:2],
             }
             self.order.append(kf_id)
             self.rgb[kf_id] = rgb
@@ -461,6 +696,52 @@ class Reconstructor:
             + (f", peak GPU {self.runner.last_peak_gb:.2f} GB" if self.runner.last_peak_gb else "")
             + f" | model has {len(self.order)} keyframes, {len(self.pending)} waiting")
         return True
+
+    def _refine(self, sim, out, overlap_ids):
+        """If this batch revisits an older part of the model, pull it onto that surface (see icp_refine)."""
+        if cKDTree is None:
+            if not getattr(self, "_warned_scipy", False):
+                log("scipy not installed: skipping revisit alignment (run start.bat to install it)")
+                self._warned_scipy = True
+            return sim
+        # "older" = keyframes before the recent chain this batch was attached to
+        recent = set(self.order[-self.batch_size:])
+        old_ids = [k for k in self.order if k not in recent]
+        if not old_ids or self._anchor is None:
+            return sim
+        rng = np.random.default_rng(self.batches)
+        src = []
+        for f in out[len(overlap_ids):]:   # only the NEW frames can reveal a double layer
+            c = f["conf"]
+            good = (c >= np.percentile(c, self.conf_percentile)) & np.isfinite(f["points"]).all(-1)
+            src.append(f["points"][good])
+        if not src:
+            return sim
+        src = apply_sim(sim, np.concatenate(src))
+        if len(src) > 15000:
+            src = src[rng.integers(0, len(src), 15000)]
+        lo, hi = src.min(0), src.max(0)
+        pad = 0.1 * (hi - lo)
+        tgt = np.concatenate([self.frames[k]["good_pts"] for k in old_ids])
+        tgt = tgt[np.all((tgt > lo - pad) & (tgt < hi + pad), axis=1)]
+        if len(tgt) < 2000:
+            return sim   # not a revisit
+        if len(tgt) > 150000:
+            tgt = tgt[rng.integers(0, len(tgt), 150000)]
+        a_src, a_dst = self._anchor
+        a_src = apply_sim(sim, a_src)
+        t0 = time.time()
+        res = icp_refine(src, tgt, a_src, a_dst)
+        if res is None:
+            return sim
+        R, t, before, after = res
+        extent = np.linalg.norm(hi - lo)
+        angle = np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
+        if not after < 0.9 * before or np.linalg.norm(t) > 0.05 * extent or angle > 5:
+            return sim
+        log(f"revisit: pulled onto earlier scan, gap {before / extent:.2%} -> {after / extent:.2%} ({time.time() - t0:.2f}s)")
+        s, Rs, ts = sim
+        return s, R @ Rs, R @ ts + t
 
     def _align(self, overlap_ids, overlap_out):
         src, dst, w = [], [], []
@@ -482,6 +763,8 @@ class Reconstructor:
             sel = np.random.default_rng(0).choice(len(src), 60000, replace=False)
             src, dst, w = src[sel], dst[sel], w[sel]
         s, R, t, med, inliers = robust_similarity(src, dst, w)
+        sel = np.random.default_rng(1).integers(0, len(src), min(len(src), 4000))
+        self._anchor = (src[sel], dst[sel])
         scene = np.linalg.norm(np.percentile(dst, 95, axis=0) - np.percentile(dst, 5, axis=0))
         rel = med / max(scene, 1e-9)
         if rel > 0.05 or inliers < 0.3:
@@ -493,11 +776,11 @@ class Reconstructor:
     def all_points(self, max_points=None, conf_percentile=None):
         if not self.order:
             return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
-        cp = self.conf_percentile if conf_percentile is None else conf_percentile
+        cp = self.model_conf_percentile if conf_percentile is None else conf_percentile
         P, C = [], []
         for k in self.order:
             f = self.frames[k]
-            if cp == self.conf_percentile or "conf" not in f:
+            if cp == self.model_conf_percentile or "conf" not in f:
                 P.append(f["good_pts"]); C.append(f["good_cols"])
             else:
                 good = (f["conf"] >= np.percentile(f["conf"], cp)) & np.isfinite(f["points"]).all(-1)
@@ -508,12 +791,16 @@ class Reconstructor:
             P, C = P[sel], C[sel]
         return P, C
 
+    def views(self):
+        return [(k, f["cam_to_world"], f["K"], f["photo"], f["size"])
+                for k in self.order for f in (self.frames[k],) if f.get("K") is not None and f.get("photo")]
+
     def camera_positions(self):
         return np.array([self.frames[k]["cam_to_world"][:3, 3] for k in self.order])
 
     def model_message(self, scan_id, max_points=25000):
         pts, cols = self.all_points(max_points=max_points)
-        grid = fit_grid(*self.all_points(max_points=300000))
+        grid = fit_grid(*self.all_points(max_points=300000), views=self.views(), cache=self.photos)
         return {
             "type": "model",
             "scan": scan_id,
