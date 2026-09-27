@@ -1,6 +1,7 @@
 // buoay-app server
 // Serves /recording (phone camera) and /dashboard (live view) over HTTPS,
 // and relays JPEG frames from the phone to every open dashboard via WebSocket.
+// Also relays sub controls: dashboard -> server -> sub/bridge.py (on the sub's Wi-Fi) -> ESP32.
 //
 //   node server.js            local network only
 //   node server.js --tunnel   also reachable from anywhere through a free Cloudflare tunnel
@@ -80,6 +81,8 @@ function publishLinks() {
     const l = linkSet(links.public);
     lines.push('FROM ANYWHERE (Cloudflare tunnel, changes every time the server restarts):');
     lines.push(`  Dashboard: ${l.dashboard}`, `  Phone:     ${l.phone}`, '');
+    lines.push('SUB CONTROLS (on a computer joined to the sub\'s Wi-Fi, e.g. the Pixel hotspot):');
+    lines.push(`  python sub/bridge.py "${l.dashboard}"`, '');
   } else if (USE_TUNNEL) {
     lines.push('Tunnel starting... (this file updates when it is up)', '');
   }
@@ -157,6 +160,13 @@ function startTunnel(port) {
   });
 }
 
+// ---------- sub controls ----------
+// Dashboards send drive / servo commands. The server keeps the current command and streams it to
+// the sub bridge (sub/bridge.py, running on a computer joined to the same Wi-Fi as the ESP32), which
+// turns it into the Bowie firmware's 16-byte UDP TeleopCommand.
+const DRIVE_HOLD_MS = 500; // motors stop if no dashboard has refreshed the drive command for this long
+const clamp01 = (v) => (Number.isFinite(+v) ? Math.min(1, Math.max(0, +v)) : 0);
+
 function lanAddresses() {
   return Object.values(os.networkInterfaces())
     .flat()
@@ -221,6 +231,50 @@ async function main() {
     for (const v of viewers) if (v.readyState === 1) v.send(msg);
   };
 
+  // Sub controls state
+  let sub = null; // the bridge connection (role=sub)
+  const control = { left: 0, right: 0, servo: 0.5, driveAt: 0 };
+  let subInfo = { connected: false };
+  let lastControlMsg = '', lastControlSentAt = 0;
+  const controlMsg = () => JSON.stringify({
+    type: 'control', left: control.left, right: control.right, servo: control.servo, sub: subInfo,
+  });
+  const sendToSub = () => {
+    if (sub && sub.readyState === 1) {
+      sub.send(JSON.stringify({ type: 'drive', left: control.left, right: control.right, servo: control.servo, t: Date.now() }));
+    }
+  };
+  const pushControl = (force) => {
+    const msg = controlMsg();
+    if (!force && msg === lastControlMsg && Date.now() - lastControlSentAt < 1000) return;
+    lastControlMsg = msg;
+    lastControlSentAt = Date.now();
+    toViewers(msg);
+  };
+  const onControl = (m) => {
+    if (m.type === 'drive') {
+      control.left = clamp01(m.left);
+      control.right = clamp01(m.right);
+      control.driveAt = Date.now();
+    } else if (m.type === 'servo') {
+      control.servo = clamp01(m.value);
+    } else if (m.type === 'stop') {
+      control.left = control.right = 0;
+      control.driveAt = 0;
+    } else return;
+    sendToSub();
+    pushControl();
+  };
+  // Heartbeat: deadman stop, keep the bridge fed (it stops the motors if the server goes quiet),
+  // and keep dashboards in sync.
+  setInterval(() => {
+    if ((control.left || control.right) && Date.now() - control.driveAt > DRIVE_HOLD_MS) {
+      control.left = control.right = 0;
+    }
+    sendToSub();
+    pushControl();
+  }, 100);
+
   wss.on('connection', (ws, req) => {
     const role = new URL(req.url, 'https://x').searchParams.get('role');
 
@@ -284,12 +338,46 @@ async function main() {
           console.log('[worker] disconnected');
         }
       });
+    } else if (role === 'sub') {
+      if (sub) sub.close(4000, 'Replaced by a newer sub bridge');
+      sub = ws;
+      subInfo = { connected: true, target: null, host: null, rtt: null, packets: 0, error: null };
+      console.log('[sub] bridge connected');
+      pushControl(true);
+      ws.on('message', (data, isBinary) => {
+        if (isBinary) return;
+        let m;
+        try { m = JSON.parse(data.toString()); } catch { return; }
+        if (m.type === 'hello') {
+          subInfo.target = String(m.target || '').slice(0, 64);
+          subInfo.host = String(m.host || '').slice(0, 64);
+          console.log(`[sub] bridge on ${subInfo.host} -> ESP32 at ${subInfo.target}`);
+        } else if (m.type === 'ack' && Number.isFinite(m.t)) {
+          subInfo.rtt = Math.max(0, Date.now() - m.t);
+        } else if (m.type === 'bridge') {
+          subInfo.packets = Number(m.packets) || 0;
+          subInfo.error = m.error ? String(m.error).slice(0, 120) : null;
+        }
+      });
+      ws.on('close', () => {
+        if (sub === ws) {
+          sub = null;
+          subInfo = { connected: false };
+          console.log('[sub] bridge disconnected');
+          pushControl(true);
+        }
+      });
     } else {
       viewers.add(ws);
       console.log(`[dashboard] connected (${viewers.size} open)`);
       ws.send(JSON.stringify({ type: 'status', cameraConnected: !!camera, recording }));
       ws.send(lastRecon || JSON.stringify({ type: 'recon', state: 'offline' }));
       if (lastModel) ws.send(lastModel);
+      ws.send(controlMsg());
+      ws.on('message', (data, isBinary) => {
+        if (isBinary) return;
+        try { onControl(JSON.parse(data.toString())); } catch {}
+      });
       ws.on('close', () => viewers.delete(ws));
     }
   });

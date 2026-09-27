@@ -18,14 +18,18 @@
   .pill.busy i { background: var(--busy); animation: blink 1s infinite; }
   .pill.rec i { background: var(--rec); animation: blink 1s infinite; }
   @keyframes blink { 50% { opacity: .25; } }
-  main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; }
-  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  /* Left column: camera on top, sub controls below. Right column: 3D model. */
+  main { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 16px; padding: 16px 20px;
+         grid-template-areas: "feed model" "controls model" "stats stats"; }
+  #feedCard { grid-area: feed; } #controlsCard { grid-area: controls; } #modelCard { grid-area: model; } #statsCard { grid-area: stats; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; grid-template-areas: "feed" "controls" "model" "stats"; } }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; }
   .card-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
   .card-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; flex: 1; }
   .view { position: relative; background: #000; aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center; }
   .view img { width: 100%; height: 100%; object-fit: contain; display: none; }
-  #model { background: #0b0e12; }
+  #feedCard .view { aspect-ratio: 16 / 9; }
+  #model { background: #0b0e12; aspect-ratio: auto; flex: 1; min-height: 360px; }
   #model canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
   .empty { color: var(--muted); font-size: 15px; text-align: center; padding: 0 24px; z-index: 1; pointer-events: none; }
   .hint { position: absolute; bottom: 8px; left: 12px; font-size: 12px; color: var(--muted); pointer-events: none; }
@@ -51,6 +55,29 @@
   dialog input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; margin-bottom: 10px; }
   dialog .row { display: flex; gap: 8px; }
   dialog .note { margin: 10px 0 0; }
+  /* sub controls */
+  .ctl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px 20px; padding: 14px; align-items: start; }
+  @media (max-width: 520px) { .ctl { grid-template-columns: 1fr; } }
+  .pad { display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: 60px 40px; gap: 6px; }
+  .pad button { background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 8px;
+                font: inherit; font-size: 20px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+                gap: 2px; cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .pad button small { font-size: 11px; color: var(--muted); }
+  .pad button.active { border-color: var(--accent); background: rgba(77,163,255,.22); }
+  .pad .stop { grid-column: 1 / -1; font-size: 13px; font-weight: 700; letter-spacing: .06em;
+               background: rgba(255,84,73,.12); border-color: rgba(255,84,73,.5); color: #ffb4ae; flex-direction: row; gap: 8px; }
+  .pad .stop.active { background: rgba(255,84,73,.3); border-color: var(--rec); }
+  .knobs { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px 10px; align-items: center; font-size: 13px; }
+  .knobs label { color: var(--muted); }
+  .knobs output { font-variant-numeric: tabular-nums; min-width: 3.2em; text-align: right; }
+  .knobs input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+  .servo-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .servo-row input { flex: 1; min-width: 0; }
+  .bar { height: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .1s linear; }
+  #subMsg { grid-column: 1 / -1; font-size: 12px; color: var(--muted); min-height: 1.2em; }
+  #subMsg code { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  .keys { font-size: 12px; color: var(--muted); }
   #reconMsg { padding: 0 14px 12px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
 </style>
 <script type="importmap">
@@ -63,6 +90,7 @@
     <span class="pill" id="serverPill"><i></i><span>Server</span></span>
     <span class="pill" id="cameraPill"><i></i><span>Phone offline</span></span>
     <span class="pill" id="reconPill"><i></i><span>3D worker offline</span></span>
+    <span class="pill" id="subPill"><i></i><span>Sub offline</span></span>
     <button class="t" id="phoneBtn" style="margin-left:auto">Phone link</button>
   </header>
   <dialog id="phoneDlg">
@@ -74,7 +102,7 @@
     <p class="note" id="linkNote"></p>
   </dialog>
   <main>
-    <section class="card">
+    <section class="card" id="feedCard">
       <div class="card-head"><h2>Live feed</h2></div>
       <div class="view">
         <img id="frame" alt="Live feed from phone">
@@ -82,7 +110,28 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="controlsCard">
+      <div class="card-head"><h2>Sub controls</h2><span class="keys">Hold W / A / D to drive · Space stops · Q / E servo</span></div>
+      <div class="ctl">
+        <div class="pad">
+          <button data-dir="left" title="Turn left (A)">&#9664;<small>A</small></button>
+          <button data-dir="forward" title="Forward (W)">&#9650;<small>W</small></button>
+          <button data-dir="right" title="Turn right (D)">&#9654;<small>D</small></button>
+          <button class="stop" id="stopBtn" title="Stop motors (Space)">STOP <small>SPACE</small></button>
+        </div>
+        <div class="knobs">
+          <label for="speed">Speed</label><input type="range" id="speed" min="10" max="100" step="5" value="50"><output id="speedOut">50%</output>
+          <label for="servo">Servo</label>
+          <div class="servo-row"><input type="range" id="servo" min="0" max="100" step="1" value="50" title="Q / E step it down / up"><button class="t" id="servoCenter">Center</button></div>
+          <output id="servoOut">0.50</output>
+          <label>Left motor</label><div class="bar"><i id="barL"></i></div><output id="outL">0.00</output>
+          <label>Right motor</label><div class="bar"><i id="barR"></i></div><output id="outR">0.00</output>
+        </div>
+        <div id="subMsg"></div>
+      </div>
+    </section>
+
+    <section class="card" id="modelCard">
       <div class="card-head">
         <h2>3D model</h2>
         <button class="t on" data-layer="lines">Grid lines</button>
@@ -100,7 +149,7 @@
       </div>
     </section>
 
-    <section class="card" style="grid-column: 1 / -1">
+    <section class="card" id="statsCard">
       <div class="stats">
         <div>
           <div class="card-head"><h2>Stream</h2></div>
@@ -203,14 +252,134 @@ function onModel(m) {
   $('modelEmpty').style.display = 'none';
 }
 
+// ---------- sub controls ----------
+// Same mapping as Bowie's Control/Drive.py: W = both motors, A = left motor only, D = right motor only.
+// Forward only: the firmware never switches the motor direction pins, so there is no reverse yet.
+const DRIVE = { forward: [1, 1], left: [1, 0], right: [0, 1] };
+const DRIVE_KEYS = { KeyW: 'forward', ArrowUp: 'forward', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right' };
+const SERVO_STEP = 0.05;
+let sock = null;
+const held = []; // drive directions held down (keys and buttons), most recent last
+let servoVal = 0.5, servoDragging = false, servoChangedAt = 0;
+
+function send(msg) { if (sock && sock.readyState === 1) sock.send(JSON.stringify(msg)); }
+function sendDrive() {
+  const top = held[held.length - 1];
+  const [l, r] = top ? DRIVE[top.dir] : [0, 0];
+  const speed = +$('speed').value / 100;
+  send({ type: 'drive', left: l * speed, right: r * speed });
+}
+function updatePad() {
+  const dir = held.length ? held[held.length - 1].dir : null;
+  document.querySelectorAll('[data-dir]').forEach((b) => b.classList.toggle('active', b.dataset.dir === dir));
+}
+function press(src, dir) {
+  release(src, true);
+  held.push({ src, dir });
+  updatePad();
+  sendDrive();
+}
+function release(src, quiet) {
+  const i = held.findIndex((h) => h.src === src);
+  if (i < 0) return;
+  held.splice(i, 1);
+  if (!quiet) { updatePad(); sendDrive(); }
+}
+function stopAll() {
+  held.length = 0;
+  updatePad();
+  send({ type: 'stop' });
+  $('stopBtn').classList.add('active');
+  setTimeout(() => $('stopBtn').classList.remove('active'), 200);
+}
+// Keep-alive while held: the server stops the motors 0.5 s after the last drive message.
+setInterval(() => { if (held.length) sendDrive(); }, 100);
+
+function setServo(v, fromSlider) {
+  servoVal = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
+  if (!fromSlider) $('servo').value = Math.round(servoVal * 100);
+  $('servoOut').textContent = servoVal.toFixed(2);
+  servoChangedAt = Date.now();
+  send({ type: 'servo', value: servoVal });
+}
+
+document.querySelectorAll('[data-dir]').forEach((b) => {
+  const src = 'btn:' + b.dataset.dir;
+  b.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    b.setPointerCapture(e.pointerId);
+    press(src, b.dataset.dir);
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, () => release(src));
+  b.addEventListener('contextmenu', (e) => e.preventDefault()); // long-press on touch screens
+});
+$('stopBtn').onclick = stopAll;
+$('speed').oninput = () => {
+  $('speedOut').textContent = $('speed').value + '%';
+  if (held.length) sendDrive();
+};
+$('servo').oninput = () => setServo($('servo').value / 100, true);
+$('servo').onpointerdown = () => { servoDragging = true; };
+$('servo').onpointerup = $('servo').onchange = () => { servoDragging = false; };
+$('servoCenter').onclick = () => setServo(0.5);
+
+const typing = (e) => e.ctrlKey || e.metaKey || e.altKey ||
+  (e.target.closest && e.target.closest('input:not([type=range]), textarea, select'));
+addEventListener('keydown', (e) => {
+  if (typing(e)) return;
+  if (DRIVE_KEYS[e.code]) {
+    e.preventDefault();
+    if (!e.repeat) press('key:' + e.code, DRIVE_KEYS[e.code]);
+  } else if (e.code === 'Space') {
+    e.preventDefault();
+    stopAll();
+  } else if (e.code === 'KeyQ') setServo(servoVal - SERVO_STEP);
+  else if (e.code === 'KeyE') setServo(servoVal + SERVO_STEP);
+});
+addEventListener('keyup', (e) => { if (DRIVE_KEYS[e.code]) release('key:' + e.code); });
+// Never leave the sub driving when this window loses focus (keyup would never arrive).
+addEventListener('blur', () => { if (held.length) stopAll(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && held.length) stopAll(); });
+
+function onControl(c) {
+  $('barL').style.width = (c.left * 100) + '%';
+  $('barR').style.width = (c.right * 100) + '%';
+  $('outL').textContent = c.left.toFixed(2);
+  $('outR').textContent = c.right.toFixed(2);
+  // Follow servo changes made from another dashboard (but not while this one is adjusting it).
+  if (!servoDragging && Date.now() - servoChangedAt > 800 && Math.abs(c.servo - servoVal) > 0.001) {
+    servoVal = c.servo;
+    $('servo').value = Math.round(servoVal * 100);
+    $('servoOut').textContent = servoVal.toFixed(2);
+  }
+  const sub = c.sub || {};
+  const msg = $('subMsg');
+  if (!sub.connected) {
+    setPill($('subPill'), '', 'Sub offline');
+    msg.innerHTML = 'No sub bridge connected. On a computer joined to the sub\'s Wi-Fi (the Pixel hotspot), run ' +
+      '<code>python sub/bridge.py "&lt;dashboard link&gt;"</code>. The full command is in LINKS.txt.';
+  } else if (sub.error) {
+    setPill($('subPill'), 'rec', 'Sub bridge error');
+    msg.textContent = `Bridge on ${sub.host || '?'}: ${sub.error}`;
+  } else {
+    setPill($('subPill'), 'ok', sub.rtt == null ? 'Sub bridge connected' : `Sub bridge · ${sub.rtt} ms`);
+    msg.textContent = `Bridge on ${sub.host || '?'} → ESP32 ${sub.target || '?'} · ${sub.packets || 0} packets sent. ` +
+      'The ESP32 doesn\'t reply, so watch the sub to confirm it responds.';
+  }
+}
+
 function connect() {
   const ws = new WebSocket(`wss://${location.host}/ws?role=viewer`);
+  sock = ws;
   ws.binaryType = 'blob';
   ws.onopen = () => setPill($('serverPill'), 'ok', 'Server connected');
   ws.onclose = () => {
     setPill($('serverPill'), '', 'Server offline');
     setPill($('cameraPill'), '', 'Phone offline');
     setPill($('reconPill'), '', '3D worker offline');
+    setPill($('subPill'), '', 'Sub offline');
+    held.length = 0;
+    updatePad();
     setTimeout(connect, 1500);
   };
   ws.onmessage = (ev) => {
@@ -223,6 +392,7 @@ function connect() {
         $('empty').textContent = s.recording ? 'Waiting for frames...' : 'Waiting for the phone to start recording...';
       } else if (s.type === 'recon') onRecon(s);
       else if (s.type === 'model') onModel(s);
+      else if (s.type === 'control') onControl(s);
       return;
     }
     // Binary message = one JPEG frame
