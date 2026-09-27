@@ -7,6 +7,8 @@ cd /d "%~dp0"
 where node >nul 2>nul || (echo Node.js not found. Install it from nodejs.org, then run this again. & pause & exit /b 1)
 if not exist "%LOCALAPPDATA%\buoay-app\venv\Scripts\python.exe" (echo Run processing\setup.bat first. & pause & exit /b 1)
 call npm install --no-audit --no-fund || (pause & exit /b 1)
+REM newer versions need scipy (revisit alignment); install it if an older setup lacks it
+"%LOCALAPPDATA%\buoay-app\venv\Scripts\python.exe" -c "import scipy" >nul 2>nul || "%LOCALAPPDATA%\buoay-app\venv\Scripts\python.exe" -m pip install --only-binary=:all: scipy
 
 set "BUOAY_TUNNEL=--tunnel"
 if /i "%~1"=="local" set "BUOAY_TUNNEL="

@@ -138,6 +138,7 @@ export function createModelViewer(container) {
       tex.flipY = false;
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.magFilter = THREE.LinearFilter;
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy(); // stays sharp when viewed at an angle
       fills.photo = new THREE.Mesh(photoGeo, new THREE.MeshBasicMaterial({
         map: tex, side: THREE.DoubleSide,
         polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 })); // keeps grid lines on top

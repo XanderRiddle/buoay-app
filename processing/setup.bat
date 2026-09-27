@@ -47,7 +47,7 @@ REM     Python and ends up compiled with the wrong compiler. VGGT runs fine on n
 REM     so install it without its pins, and never compile anything from source. ---
 echo.
 echo Installing VGGT...
-pip install --only-binary=:all: "numpy>=2" Pillow huggingface_hub einops safetensors opencv-python websockets || goto :fail
+pip install --only-binary=:all: "numpy>=2" Pillow huggingface_hub einops safetensors opencv-python websockets scipy || goto :fail
 pip install --no-deps https://github.com/facebookresearch/vggt/archive/refs/heads/main.zip || goto :fail
 echo.
 python -c "import numpy, torch; print('numpy', numpy.__version__, '| torch', torch.__version__); ok=torch.cuda.is_available(); print('CUDA GPU found:', torch.cuda.get_device_name(0) if ok else 'none, will run on CPU')" || goto :fail
