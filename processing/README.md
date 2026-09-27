@@ -2,6 +2,9 @@
 
 - `worker.py`: the live reconstruction worker (started by `start.bat` in the main folder). Also `--images <folder>` to rebuild a model from photos. Batch size is picked from GPU memory (10 photos on an 8 GB card, 6 on 4 GB).
 - `recon.py`: VGGT wrapper, batch stitching, grid fitting.
+- `anomaly.py`: the surface check. Scores every grid cell for bumps/dents (height compared with a smooth
+  local surface) and every texel of the photo texture for color changes (compared with the typical color
+  around it). The dashboard highlights scores above its sensitivity setting (red / yellow).
 - `vggt_smoke_test.py`: one-off test of VGGT on a few photos (memory + timing).
 
 `setup.bat` installs everything for all three into `%LOCALAPPDATA%\buoay-app\venv` (outside OneDrive, one per computer). Run it again on any machine that was set up before (it also removes the old `.venv` from this folder).

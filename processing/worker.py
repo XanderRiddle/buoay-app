@@ -399,7 +399,9 @@ button{background:#181c22;color:#e6e9ee;border:1px solid #2a3039;border-radius:6
 "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script></head>
 <body><div id="v"></div><div id="hud">
 <button data-t="lines">Grid lines</button> Surface: <button data-s="off">Off</button><button data-s="blue">Blue</button><button data-s="photo">Photo</button> <button data-t="points">Points</button><button data-t="cams">Camera path</button>
-<button id="reset">Reset view</button> &nbsp; drag to rotate, right-drag to pan, scroll to zoom</div>
+<button id="reset">Reset view</button> &nbsp; drag to rotate, right-drag to pan, scroll to zoom<br>
+Surface check: <button data-h="damage" style="color:#ff5a4f">Damage (red)</button><button data-h="color" style="color:#ffc400">Color change (yellow)</button>
+Sensitivity <input type="range" id="sens" min="1" max="10" value="5" style="vertical-align:middle;width:90px"> <span id="hsum"></span></div>
 <script type="module">
 __VIEWER__
 const viewer = createModelViewer(document.getElementById('v'));
@@ -407,6 +409,11 @@ viewer.update(__DATA__);
 document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => viewer.setVisible(b.dataset.t, !viewer.isVisible(b.dataset.t)));
 document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => viewer.setSurface(b.dataset.s));
 document.getElementById('reset').onclick = () => viewer.resetView();
+document.querySelectorAll('[data-h]').forEach(b => b.onclick = () => {
+  const on = !viewer.getHighlight(b.dataset.h); viewer.setHighlight(b.dataset.h, on); b.style.opacity = on ? 1 : 0.4; });
+document.getElementById('sens').oninput = (e) => viewer.setThreshold(3.5 * Math.pow(2, (5 - Number(e.target.value)) / 3));
+const d = (x) => !x ? '-' : x.loading ? '...' : `${x.areas} area(s), ${(x.fraction * 100).toFixed(1)}%`;
+viewer.onHighlights(s => document.getElementById('hsum').textContent = s ? `damage: ${d(s.damage)} | color: ${d(s.color)}` : '');
 </script></body></html>"""
 
 

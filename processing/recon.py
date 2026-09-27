@@ -21,6 +21,8 @@ import cv2
 import numpy as np
 import torch
 
+import anomaly
+
 # VGGT's own code uses an old PyTorch call that prints a warning on every batch
 warnings.filterwarnings("ignore", message=r".*torch\.cuda\.amp\.autocast.*", category=FutureWarning)
 from PIL import Image
@@ -249,12 +251,17 @@ def fit_grid(points, colors=None, target_cells=48, min_pts=4):
     grid = grid.reshape(nv, nu)
 
     grid = _clean_grid(grid)
-    tex = _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid) if colors is not None else None
+    tex, img, have = _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid) if colors is not None else (None, None, None)
     origin = center + u0 * u_ax + v0 * v_ax
+    try:  # red / yellow highlights; never let them break the model update
+        anomalies = anomaly.analyze(grid, cell, img, have, TEX_SUB)
+    except Exception as e:
+        log(f"surface check failed: {e!r}")
+        anomalies = None
     return {"origin": origin.tolist(), "u": u_ax.tolist(), "v": v_ax.tolist(), "n": n_ax.tolist(),
             "cell": float(cell), "nu": nu, "nv": nv,
             "h": [None if np.isnan(x) else round(float(x), 5) for x in grid.ravel()],
-            "texture": tex}
+            "texture": tex, "anomalies": anomalies}
 
 
 TEX_SUB = 4  # photo texture pixels per grid cell (per side)
@@ -263,7 +270,8 @@ TEX_SUB = 4  # photo texture pixels per grid cell (per side)
 def _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid):
     """
     Photo texture for the grid: average camera color on a raster TEX_SUB times finer than
-    the grid, gaps filled by inpainting. Returned as a PNG data URL.
+    the grid, gaps filled by inpainting. Returns (message dict with a JPEG data URL,
+    the RGB image, mask of texels the camera actually saw).
     """
     W, H = (nu - 1) * TEX_SUB + 1, (nv - 1) * TEX_SUB + 1
     x = np.clip(np.round((u - u0) / cell * TEX_SUB).astype(int), 0, W - 1)
@@ -276,12 +284,13 @@ def _surface_texture(u, v, colors, u0, v0, cell, nu, nv, grid):
     have = counts > 0
     img[have] /= counts[have, None]
     img = (np.clip(img, 0, 1) * 255).astype(np.uint8).reshape(H, W, 3)
-    holes = (~have).reshape(H, W).astype(np.uint8)
+    have = have.reshape(H, W)
+    holes = (~have).astype(np.uint8)
     if holes.any() and have.any():
         img = cv2.inpaint(img, holes, 3, cv2.INPAINT_TELEA)
     ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return {"w": W, "h": H, "sub": TEX_SUB,
-            "png": "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()}
+    return ({"w": W, "h": H, "sub": TEX_SUB,
+             "png": "data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()}, img, have)
 
 
 def pack_points(pts, cols):
@@ -307,12 +316,18 @@ def _clean_grid(grid):
     with np.errstate(all="ignore"):
         import warnings
         warnings.simplefilter("ignore", RuntimeWarning)
-        # 1. drop spikes that disagree with their neighbors
+        # 1. drop spikes that disagree with their neighbors. Only lone cells (1-2 in a row) and
+        #    cells on the ragged edge of the scan: a group of odd cells is a real dent or bump,
+        #    which the damage check needs to see, so it stays.
         nb = _neighbors(grid)
         med = np.nanmedian(nb, axis=0)
         diff = np.abs(grid - med)
         mad = np.nanmedian(diff)
-        grid = np.where(diff > 4 * max(mad, 1e-6), np.nan, grid)
+        odd = (diff > 4 * max(mad, 1e-6)).astype(np.uint8)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(odd, connectivity=8)
+        lone = (stats[labels, cv2.CC_STAT_AREA] <= 2) & (odd > 0)
+        edge = np.isfinite(grid) & (np.isnan(nb).sum(0) > 0)
+        grid = np.where(lone | (edge & (odd > 0)), np.nan, grid)
         # 2. fill small holes (cells with >= 5 valid neighbors), twice
         for _ in range(2):
             nb = _neighbors(grid)
