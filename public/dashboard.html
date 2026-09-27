@@ -374,6 +374,8 @@ const typing = (e) => e.ctrlKey || e.metaKey || e.altKey ||
   (e.target.closest && e.target.closest('input:not([type=range]), textarea, select'));
 addEventListener('keydown', (e) => {
   if (typing(e)) return;
+  // A focused slider (speed, servo, surface-check sensitivity) keeps its arrow keys; W / A / D still drive.
+  if (e.code.startsWith('Arrow') && e.target.matches && e.target.matches('input[type=range]')) return;
   if (DRIVE_KEYS[e.code]) {
     e.preventDefault();
     if (!e.repeat) press('key:' + e.code, DRIVE_KEYS[e.code]);
