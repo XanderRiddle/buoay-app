@@ -88,6 +88,13 @@ motor direction pins.
 - **3D model**: the surface as a blue wireframe grid that grows as you scan. Drag to rotate, right-drag to pan,
   scroll to zoom. **Grid lines** on/off; **Surface** under the grid: Off, Blue (see-through), or **Photo** (the real
   camera colors mapped onto the mesh). Toggle **Points** and **Camera path**. **Reset view** re-fits the view.
+- **Surface check**: spots that don't match the surface around them glow on the model.
+  **Red = damage** (a bump or dent: the shape sticks out of, or sinks into, the local surface).
+  **Yellow = color change** (rust, growth, stains, paint loss). Each can be switched on/off; **Sensitivity**
+  sets how much a spot has to stand out (5 is the default, 10 flags the faintest changes, 1 only the obvious ones).
+  The panel at the bottom counts the areas and how much of the surface they cover.
+  On a busy, patterned surface (brick, posters) the color check has little to go on: it works best on a
+  mostly uniform surface like a painted hull.
 - **Reconstruction** stats: keyframes, backlog, batch time, GPU memory.
 
 Scale is relative: the shape is right, but there are no real-world units yet.

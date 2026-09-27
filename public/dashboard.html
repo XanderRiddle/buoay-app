@@ -78,6 +78,14 @@
   #subMsg { grid-column: 1 / -1; font-size: 12px; color: var(--muted); min-height: 1.2em; }
   #subMsg code { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
   .keys { font-size: 12px; color: var(--muted); }
+  button.t .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; opacity: .45; }
+  button.t.on .dot { opacity: 1; }
+  .dot.red { background: #ff3b30; box-shadow: 0 0 6px #ff3b30; }
+  .dot.yellow { background: #ffc400; box-shadow: 0 0 6px #ffc400; }
+  .sens { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-left: 4px; }
+  .sens input { width: 80px; accent-color: var(--accent); }
+  .sens.off { opacity: .4; }
+  .check { grid-column: 1 / -1; border-top: 1px solid var(--line); }
   #reconMsg { padding: 0 14px 12px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
 </style>
 <script type="importmap">
@@ -143,6 +151,13 @@
         <button class="t on" data-layer="cams">Camera path</button>
         <button class="t" id="resetView">Reset view</button>
       </div>
+      <div class="card-head" title="Surface check: highlights spots that don't match the surface around them">
+        <h2>Surface check</h2>
+        <button class="t on" data-hl="damage"><span class="dot red"></span>Damage</button>
+        <button class="t on" data-hl="color"><span class="dot yellow"></span>Color change</button>
+        <label class="sens" id="sensWrap" title="How far a spot has to stand out before it's highlighted">Sensitivity
+          <input type="range" id="sens" min="1" max="10" step="1" value="5"></label>
+      </div>
       <div class="view" id="model">
         <div class="empty" id="modelEmpty">Start recording on the phone. The model appears after the first ~6 keyframes.</div>
         <div class="hint">Drag to rotate · right-drag to pan · scroll to zoom</div>
@@ -174,6 +189,13 @@
           </dl>
           <div id="reconMsg"></div>
         </div>
+        <div class="check">
+          <div class="card-head"><h2>Surface check</h2></div>
+          <dl>
+            <dt><span class="dot red" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span>Damage (bumps / dents)</dt><dd id="hDamage">-</dd>
+            <dt><span class="dot yellow" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span>Color changes</dt><dd id="hColor">-</dd>
+          </dl>
+        </div>
       </div>
     </section>
   </main>
@@ -194,6 +216,31 @@ document.querySelectorAll('[data-layer]').forEach((b) => {
   };
 });
 $('resetView').onclick = () => viewer.resetView();
+
+// Surface check: red = bumps/dents, yellow = color changes. Each kind toggles on/off;
+// the slider sets how much a spot must stand out (5 = default, 10 = flag the faintest changes).
+document.querySelectorAll('[data-hl]').forEach((b) => {
+  b.onclick = () => {
+    const on = !viewer.getHighlight(b.dataset.hl);
+    viewer.setHighlight(b.dataset.hl, on);
+    b.classList.toggle('on', on);
+    const any = viewer.getHighlight('damage') || viewer.getHighlight('color');
+    viewer.setVisible('highlights', any);
+    $('sensWrap').classList.toggle('off', !any);
+  };
+});
+$('sens').oninput = () => viewer.setThreshold(3.5 * Math.pow(2, (5 - Number($('sens').value)) / 3));
+const describe = (x) => {
+  if (!x) return '-';
+  if (x.loading) return '...';
+  if (!x.areas) return 'none found';
+  const pct = x.fraction * 100;
+  return `${x.areas} area${x.areas > 1 ? 's' : ''} · ${pct < 0.1 ? '<0.1' : pct.toFixed(1)}% of surface`;
+};
+viewer.onHighlights((s) => {
+  $('hDamage').textContent = describe(s?.damage);
+  $('hColor').textContent = describe(s?.color);
+});
 document.querySelectorAll('[data-surface]').forEach((b) => {
   b.onclick = () => {
     viewer.setSurface(b.dataset.surface);
