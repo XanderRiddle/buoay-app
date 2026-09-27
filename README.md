@@ -46,6 +46,34 @@ topic name in `certs\ntfy-topic.txt` and subscribe to it in the free ntfy app.
 
 `start.bat local` skips the tunnel (same Wi-Fi only, self-signed certificate warning).
 
+## Driving the sub
+
+The sub's ESP32 (firmware in the **Bowie** repo) joins the **Pixel hotspot** and listens for UDP commands.
+The desktop is on another network and browsers can't send UDP, so a small **bridge** relays them:
+
+```
+laptop dashboard --> desktop server.js --> sub/bridge.py (any computer on the Pixel hotspot) --UDP--> ESP32
+```
+
+1. Join a laptop to the Pixel hotspot (the same one the ESP32 uses).
+2. Run the bridge with the dashboard link (the exact command is also in `LINKS.txt`):
+   ```
+   python sub/bridge.py "https://....trycloudflare.com/dashboard?key=..."
+   ```
+   On Windows you can double-click `sub\bridge.bat` instead; it asks for the link. Python standard library
+   only, nothing to install. If the ESP32 got a different IP (it prints it on serial at boot), add `--esp <ip>`.
+3. The dashboard's **Sub** pill turns green with the round-trip time. Drive from the **Sub controls** panel:
+   hold **W** (forward), **A** / **D** (turn), **Space** stops, **Q** / **E** step the servo. The on-screen
+   buttons work with mouse or touch. **Speed** sets motor power (50% matches Bowie's Drive.py).
+
+Safety: motors only run while a key or button is held. The server stops them 0.5 s after the last command
+from a dashboard, the bridge stops them 0.5 s after it last heard from the server, and the ESP32 stops them
+after 1 s without packets. Ctrl+C on the bridge sends a stop.
+
+Controls match Bowie's `Control/Drive.py` (A = left motor only, D = right motor only; flip `DRIVE` in
+`public/dashboard.html` if the turns are backwards). There's no reverse: the firmware never drives the
+motor direction pins.
+
 ## Scanning tips
 
 - **Hold the phone sideways (landscape)**, point it straight at the surface, about 1 m away.
@@ -56,7 +84,7 @@ topic name in `certs\ntfy-topic.txt` and subscribe to it in the free ntfy app.
 
 ## What the dashboard shows
 
-- **Live feed** from the phone.
+- **Live feed** from the phone, with the **Sub controls** under it.
 - **3D model**: the surface as a blue wireframe grid that grows as you scan. Drag to rotate, right-drag to pan,
   scroll to zoom. **Grid lines** on/off; **Surface** under the grid: Off, Blue (see-through), or **Photo** (the real
   camera colors mapped onto the mesh). Toggle **Points** and **Camera path**. **Reset view** re-fits the view.
